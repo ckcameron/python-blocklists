@@ -1,0 +1,5 @@
+colorama==0.4.6
+future==1.0.0
+ipaddresses==0.0.2
+pathlib==1.0.1
+sockets==1.0.0

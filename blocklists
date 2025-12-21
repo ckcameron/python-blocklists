@@ -1,0 +1,235 @@
+#!/bin/python
+#################################################################################################################
+#################################################################################################################
+# blocklists 
+#
+# Copyright 2025, CK Cameron (chase@ckcameron.net), Shared under the Gnu General Public License, version 3.0 ONLY
+# Written in Python 3.13
+#
+# This program will parse a list of files and directories, to scrape each line for ipaddresses, 
+#     and domain names. Domain names will be looked up for associated IPs. IPs and domains will 
+#     be written to their respective files, and finally optimized by sorting, removing duplicate 
+#     entries, and condensing the list of IPs into as few IP ranges as possible.
+#          Note: The script currently will pickup and use impossible IP adrresses, 
+#          e.g. 333.333.333.333. I have not run into problems with this as yet for my purposes,
+#          although I may change it at a later date.
+###############################################################################################
+
+# Import libraries
+
+import re
+from pathlib import Path
+import ipaddress
+import socket
+import time
+
+
+# Define a class for user input and parse it out by splitting the input list and sorting through it for directories and files.
+
+class Input:
+    
+    def __init__(self):
+        self.files = []
+        inputString :str = input("Please enter a space-separated list of directories or files to be parsed:")
+        userInput = inputString.split(" ")
+        self.ipFile = Path(input("Please enter the name of the IP block file:"))
+        self.domainFile = Path(input("Please enter the name of the domain block file:"))
+        items = list()
+        print('\n\nItems enqueued:\n')
+        for object in userInput:
+            object = Path(object)
+            for item in object.rglob('*'):
+                if item.is_file():
+                    self.files.append(item)
+                    print(item)
+                    time.sleep(0.1)
+                else:
+                    print('\n        ', item, "is not a file. Skipping.\n")
+
+
+
+
+
+# Create a class for the processed ips and domains
+
+class DomainIpLists:
+    
+    def __init__(self):
+        
+        # Create necessary variables and empty lists
+        self.uniqueips :int = 0
+        self.domaincount: int = 0
+        self.ipcount: int = 0
+        self.ips = list()
+        self.domains = list()
+        self.filedata = list()
+        self.file :str = ""
+        self.extracted = None
+        self.line :str = ""
+        self.cleanedLines = list()
+
+    def parseFile(self):
+        # Open each file in the file list for processing and parse it
+        
+        print("\nProcessing", self.file)
+        with open(self.file, 'r') as data:
+
+                # Evaluate lines for the presence of erroneous characters and patterns, strip them,
+                # and pull out only those that contain ip addresses
+            self.filedata = []
+            for line in data:
+                line = line.strip()
+                line = line.removeprefix('.')
+                # Remove comments
+                if re.search('#', line) is not None:
+                    marker :str = '#'
+                    line = line.split(marker, 1)[0]
+                line = line.replace("http://", "")
+                line = line.replace("|", "")
+                self.filedata.append(line)
+    
+    def optimizeIps(self):
+        print("\nNow optimizing IP blockfile and removing duplicates....")
+        
+        # Sort IPs.
+
+        self.ips = sorted(self.ips, key=ipaddress.ip_address)
+
+        # Optimize the list of IPs for ipset by removing duplicates and compressing addressses into as many contiguous ranges as possible.
+        # Then delete the contents of the IP block file to write the optimized contents to it.
+
+        uniqueips = list(set(self.ips))
+        print("\nIP count after removing duplicates:", len(uniqueips))
+        time.sleep(2)
+        ipsoptimized = ipaddress.collapse_addresses(uniqueips)
+        time.sleep(2)
+        print("\nEntry count after collapsing ip ranges:", len(ipsoptimized))
+        self.ips = []
+        for iprange in ipsoptimized:
+            self.ips.append(iprange) 
+        ipBlocks.seek(0)
+        ipBlocks.truncate()
+        for entry in self.ips:
+            ipBlocks.write((entry + '\n'))
+        print(self.ipcount, "\nIPs including ", (self.ipcount - len(self.ips)), "IP ranges added to the blockfile.")
+
+    def processDomains(self):
+        
+        # Take a line of input, remove any 0.0.0.0 entries, search for another existent IP Address in the line, 
+        # and add it to the IP blockfile and the list of IPs. Stop processing the function by returning
+        # True if an IP is found, written and appended to the IP list.
+
+        self.line = self.line.replace('0.0.0.0', '')
+        pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+        match = re.search(pattern, self.line)
+        if match:
+            self.ips.append(match.group())
+            print('\n\n     Found IP, not a domain, so', match.group(), 'added to IP blocklist.\n\n')
+            ipBlocks.write(match.group())
+            ipBlocks.write('\n')
+            self.ipcount += 1
+            return True
+        
+        else:
+            
+            # Now search the line for a string including any letter, a hyphen, or a digit, 
+            # strip the leading "www.", add it to the domain blocklist, and the domain 
+            # blockfile.
+
+            pattern = r'^[a-zA-Z0-9\-\\.]+$'
+            match = re.search(pattern, self.line)
+            if match:
+                    unstrippedwww = str(match.group())
+
+                    self.extracted = unstrippedwww.replace('www.', '')
+                    print("Adding domain to block list:", self.extracted)
+                    self.domains.append(self.extracted)
+                    domainBlocks.write((self.extracted + '\n'))
+                    self.domaincount += 1
+
+    def ipLookup(self):
+        
+        # Attempt to lookup the given domain name in each line and find associated IP address records, 
+        # without failure if no result or an error is returned. Write associated IPs to the IP blocklist 
+        # and blockfile. 
+
+        try:
+            hostinfo = socket.gethostbyname_ex(self.extracted)
+            print ("IP address(es):", hostinfo[2], "added to the ip block file.")
+                
+            [self.ips.append(address) for address in hostinfo[2] if hostinfo[2] is not None]
+            [ipBlocks.write((address + '\n')) for address in hostinfo[2] if hostinfo[2] is not None] 
+            self.ipcount += len(hostinfo[2])
+        except Exception as e:
+            print(e)
+
+    def optimizeDomains(self):
+        
+        # Optimize the list of domains by eliminating duplicates and sorting them alphabetically before 
+        # deleting the contents of the blockfile and writing the optimized contents to it 
+
+        print('\n\nNow optimizing the domain block file by removing duplicate entries and ordering the entries alphabetically.')
+        lists.domains = list(set(lists.domains))
+        lists.domains = sort(lists.domains)
+        domainBlocks.seek(0)
+        domainBlocks.truncate()
+        for domain in lists.domains:
+            domainBlocks.write(domain + "\n")
+        print(lists.domaincount, "domains added to the block file.\n")
+
+
+#Main portion of the script using the above classes
+
+try:
+
+    # Invoke the input class 
+
+    user_input = Input()
+    
+    # Get user confirmation to proceed
+    
+    time.sleep(2)
+    goahead :str = input('Proceed? (Y/N) ')
+    while True:
+        if goahead == 'Y' or goahead == "y": 
+            break
+        elif goahead == 'N' or goahead == 'n':
+            raise('\nUser aborted processing.')
+            break
+        else:
+            goahead = input('\nInvalid entry. Please select Y, N, y, or n.\n\nProceed? (Y/N)')
+    time.sleep(2)
+    
+    # Instantiate the class for the blocklists and parsing functions
+
+    lists = DomainIpLists()
+    
+    # Open the domain and ip block files and parse the the list of lines from input,
+    # adding filedata to appropriate files
+    
+    with open(user_input.domainFile, 'a') as domainBlocks:
+        with open(user_input.ipFile, 'a') as ipBlocks:
+            for listfile in user_input.files:
+                lists.file = listfile
+                lists.parseFile()
+                for line in lists.filedata:
+                    lists.line = line
+                    lists.processDomains()
+                    lists.ipLookup()
+            time.sleep(2)
+            
+            # Optimize the output files for human readability and machine-efficiency. 
+            # This will delete the content of the "WIP" blocklist files and replace 
+            # them with sorted, condensed versions thereof.
+
+            print('\n\nOptimizing blocklists.')
+            lists.optimizeDomains()
+            lists.optimizeIps()
+            time.sleep(2)
+            
+            # Le fin.
+
+            print('\n\nProcessing complete.')
+                                                             # ...but I am le tired.
+except Exception as e:
+    print(e)
