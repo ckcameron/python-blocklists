@@ -10,10 +10,10 @@
 #     and domain names. Domain names will be looked up for associated IPs. IPs and domains will 
 #     be written to their respective files, and finally optimized by sorting, removing duplicate 
 #     entries, and condensing the list of IPs into as few IP ranges as possible.
-#          Note: The script currently will pickup and use impossible IP adrresses, 
+#          Note: The script currently will pickup and use impossible IP addresses,
 #          e.g. 333.333.333.333. I have not run into problems with this as yet for my purposes,
 #          although I may change it at a later date.
-###############################################################################################
+#################################################################################################################
 
 # Import libraries
 
