@@ -1,11 +1,6 @@
 #########################################################################################
 #########################################################################################
-#  _     _            _    _ _     _       
-# | |__ | | ___   ___| | _| (_)___| |_ ___ 
-# | '_ \| |/ _ \ / __| |/ / | / __| __/ __|
-# | |_) | | (_) | (__|   <| | \__ \ |_\__ \
-# |_.__/|_|\___/ \___|_|\_\_|_|___/\__|___/
-                                         
+![ alt text ](https://patorjk.com/software/taag/#p=display&f=Ogre&t=blocklists&x=rainbow2)
 # https://github.com/ckcameron/python-blocklists
 #
 # Copyright 2025, CK Cameron (chase@ckcameron.net), Shared under the Gnu General Public License, version 3.0 ONLY
