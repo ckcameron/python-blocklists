@@ -3,7 +3,7 @@
 <img width="794" height="318" alt="blocklists" src="https://github.com/user-attachments/assets/d2a82661-4a75-4e47-af11-aadc48336ea2" />
 #### https://github.com/ckcameron/python-blocklists
 
-##### Copyright 21 December, 2025, CK Cameron (chase@ckcameron.net). Shared under the Gnu General Public License, version 3.0 ONLY.
+##### © 2025, CK Cameron (chase@ckcameron.net), All Rights Reserved. Shared under the Gnu General Public License, version 3.0 ONLY.
 ##### Written in Python 3.13 
 ##### Library dependencies: re, time, pathlib, ipaddress, and socket
 
