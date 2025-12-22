@@ -11,7 +11,7 @@
 # Copyright 2025, CK Cameron (chase@ckcameron.net), Shared under the Gnu General Public License, version 3.0 ONLY
 # Written in Python 3.13
 # 
-# Library dependencies: re, time, pathlib, and socket
+# Library dependencies: re, time, pathlib, ipaddress, and socket
 # 
 # This program will parse a list of files and directories, to scrape each line for ipaddresses, 
 #     and domain names. Domain names will be looked up for associated IPs. IPs and domains will 
