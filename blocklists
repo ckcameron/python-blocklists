@@ -4,12 +4,12 @@
 # blocklists 
 #
 # Copyright 2025, CK Cameron (chase@ckcameron.net), Shared under the Gnu General Public License, version 3.0 ONLY
-# Written in Python 3.13, using libraries re, pathlib, socket, time and ipaddress
+# Written in Python 3.14, using libraries re, pathlib, socket, time, elevate, argparse and ipaddress
 #
 # This program will parse a list of files and directories, to scrape each line for ipaddresses, 
 #     and domain names. Domain names will be looked up for associated IPs. IPs and domains will 
 #     be written to their respective files, and finally optimized by sorting, removing duplicate 
-#     entries, and condensing the list of IPs into as few IP ranges as possible.
+#     entries, and condensing the list of IPs into as few IP ranges as possible. If selected, the script will also create an ipset blocklist and add rules to your iptables firewall (default rule to blocking).
 #          Note: The script currently will pickup and use impossible IP addresses,
 #          e.g. 333.333.333.333. I have not run into problems with this as yet for my purposes,
 #          although I may change it at a later date.
@@ -19,9 +19,13 @@
 
 import re
 from pathlib import Path
+from elevate import elevate
 import ipaddress
 import socket
 import time
+import os
+import argparse
+
 
 
 # Define a class for user input and parse it out by splitting the input list and sorting through it for directories and files.
@@ -29,26 +33,67 @@ import time
 class Input:
     
     def __init__( self ):
-        self.files = []
-        inputString :str = input( "Please enter a space-separated list of directories or files to be parsed:" )
-        userInput = inputString.split( " " )
-        self.ipFile = Path( input( "Please enter the name of the IP block file:" ) )
-        self.domainFile = Path( input( "Please enter the name of the domain block file:" ) )
-        items = list()
-        print( '\n\nItems enqueued:\n' )
-        for object in userInput:
+
+        # Parse arguments passed to the script and, if necessary, gather missing data.
+
+        self.parser = argparse.ArgumentParser(
+            prog='blocklists.py',
+            description='''A python cli for creating blocklists / ipsets and adding the rules to your iptables firewall.''',
+            epilog="Copyright 2025 CK Camerousage='%(prog)s [options]n (chase@ckcameron.net), Licensed under GPLv3, all rights reserved.",
+            usage='%(prog)s [options]'
+            )
+        self.parser.add_argument('f', '--files', default='', help="input blocklist filename(s) or directories, comma-separated" )
+        self.parser.add_argument('i', '--interactive', default='1', help="interactive mode will ask for values for needed variables and about including operations" )
+        self.parser.add_argument('is', '--ipset', default='0', help="create ipset blocklist" )
+        self.parser.add_argument('in', '--ipset_name', default='blocklists-set', help="ipset blocklist name or name prefix" )
+        self.parser.add_argument('it', '--ipset_type', default='net:hash', help="ipset type, default=net:hash" )
+        self.parser.add_argument('oi', '--output_ip_list', default='', help="output ip blocklist filename or directory" )
+        self.parser.add_argument('od', '--output_domain_list', default='', help="output domain blocklist filename or directory" )
+        self.parser.add_argument('ipt', '--iptables_rules', default='0', help="add iptables rules to firewall. The default blocks incoming and outgoing traffic across all connections to or from those ips." )
+        self.parser.add_argument('ipto', '--iptables_options', default='-j DROP', help="iptables options to customize the rule, the ipset name(s) taken from the supplied argument. When using this options all flags beyond the ipset name for the rule need to be included. These include things like tables, direction, actions, ports." )
+        self.args = self.parser.parse_args()
+
+        # When in interactive mode, ather essentail inputs and determine if the user would like ipsets created, config files written, etc.
+
+        if self.args.interactive == 1:
+            self.args.files = input( "Please enter a comma-separated list of directories or files to be parsed:" )
+            self.args.output_domain_list = Path( input( "Please enter the name of the output domain block file:" ) )
+            self.args.output_ip_list = Path( input( "Please enter the name of the output ip block file:" ) )
+            self.args.ipset = input("Do you want to create the ipset file int /etc/ipsets? (Y/N)")
+
+            #Gain root privileges if we are doing operations that require it.
+            if self.args.ipset == 'Y' or 'y':
+                self.args.ipset_name = input("Please provide a name for the ipset(s) to be created: ")
+                self.args.ipset_type = input("Please provide a type of ipset(s) to be created: ")
+                self.args.iptables_rules = input("Shall the script create iptables rules for the ipset(s) created? (Y/N [default]) ")
+                self.args.iptables_options = input("Enter iptables options to be appended after the ipset name in the rules, or hit [Enter] for the default incoming and outgoing block:")
+                while os.geteuid() != 0:
+                    print("\n[sudo] password for %u required to run this script with currently given options. \n\nPlease enter your sudo password:")
+                    elevate()
+        if self.args.iptables_options == '':
+            self.args.iptables_options = '-j DROP'
+
+        # If minimal arguments are not supplied and the script is not in interactive mode, explain what is missing and exit.
+
+        if self.args.files == '':
+            raise('\n\nRequired input files or directories not given. Exiting.')
+            return 1
+        if self.args.output_ip_list == '':
+            raise("Output IP list filename not given. Exiting.")
+        if self.args.output_domain_list == '':
+            raise("Output domain list filename not given. Exiting.")
+
+        # Parse user input for filenames and directories, adding any files to the list to parse.
+
+        self.userInput = self.args.files.split(",")
+        self.items = []
+        for object in self.userInput:
             object = Path( object )
             for item in object.rglob( '*' ):
-                if item.is_file():
-                    self.files.append( item )
-                    print( item )
-                    time.sleep( 0.1 )
-                else:
-                    print( '\n        ', item, "is not a file. Skipping.\n" )
-
-
-
-
+                if item.is_file() and item not in self.items:
+                    self.items.append( item )
+                    print( item, " added to the list for processing." )
+                    time.sleep( 0.01 )
 
 # Create a class for the processed ips and domains
 
@@ -60,22 +105,24 @@ class DomainIpLists:
         self.uniqueips :int = 0
         self.domaincount :int = 0
         self.ipcount :int = 0
-        self.ips = list()
-        self.domains = list()
-        self.filedata = list()
+        self.ips = []
+        self.domains = []
+        self.filedata = []
         self.file :str = ""
         self.extracted = None
         self.line :str = ""
-        self.cleanedLines = list()
+        self.cleanedLines = []
 
     def parseFile( self ):
+
         # Open each file in the file list for processing and parse it
         
         print( "\nProcessing", self.file )
         with open( self.file, 'r' ) as data:
 
-                # Evaluate lines for the presence of erroneous characters and patterns, strip them,
-                # and pull out only those that contain ip addresses
+            # Evaluate lines for the presence of erroneous characters and patterns, strip them,
+            # and pull out only those that contain ip addresses
+
             self.filedata = []
             for line in data:
                 line = line.strip()
@@ -207,8 +254,8 @@ try:
     # Open the domain and ip block files and parse the the list of lines from input,
     # adding filedata to appropriate files
     
-    with open( user_input.domainFile, 'a' ) as domainBlocks:
-        with open( user_input.ipFile, 'a' ) as ipBlocks:
+    with open( user_input.args.output_domain_list, 'a' ) as domainBlocks:
+        with open( user_input.args.output_ip_list, 'a' ) as ipBlocks:
             for listfile in user_input.files:
                 lists.file = listfile
                 lists.parseFile()
