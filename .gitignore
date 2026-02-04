@@ -1,1 +1,13 @@
 venv/
+.venv/
+lib/
+.idea/
+.bin/
+bin/
+ips_v4
+ips_v6
+domains
+.run/
+lib64/
+pyvenv.cfg
+lib64
