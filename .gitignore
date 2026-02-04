@@ -5,3 +5,9 @@ bin/
 lib/
 include/
 lib64/
+.run/
+.venv/
+venv/
+ips_v4
+ips_v6
+domains
