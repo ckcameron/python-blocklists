@@ -417,6 +417,22 @@ class IpsetBlocklist:
             self.permanent_ipset_basename_v6 = lists.input.args.ipset6_name
         self.verbose = False
 
+        # Determine how many entries there are to be in the given ipset(s) and divide the workload based on a counter when
+        # writing-out the sets
+        with open( '/tmp/ipcount', 'a+') as ipcounted:
+            groups = ipcounted.readlines( )
+            total = 0
+            for number in groups:
+                total += int( number )
+        element_groups = ( total % 65535 ) + 1
+        ipset_group = []
+        with open( '/tmp/tmpips_v4', 'r+') as ips:
+            bulk_ips = ips.readlines( )
+            counter = 0
+            name_ordinal = 1
+            ipset_file = Path( f"{user_input.ipset_location}/{user_input.upset4_name}-{name_ordinal}" ) )
+
+
     # Write file headers by ipset restore
 
     @classmethod
