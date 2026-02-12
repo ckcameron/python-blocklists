@@ -1,4 +1,4 @@
-#!./bin/python
+#!./venv/bin/python
 #################################################################################################################
 #################################################################################################################
 # blocklists 
@@ -13,6 +13,10 @@
 #     entries, and condensing the list of IPs into as few IP ranges as possible. If selected, the
 #     script will also create an ipset blocklist and add rules to your iptables firewall
 #     (the default rule is drop).
+#
+# The script relies on the presence of iptables, iprange, and ipset in the current ${PATH}.
+#
+# All logging is written to blocklists.log in the current directory.
 #
 # This program is distributed WITHOUT ANY WARRANTY; this includes it being without the implied warrant of
 #     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -38,6 +42,21 @@ import os
 import argparse
 import traceback
 from urlextract import URLExtract
+import logging
+import string
+from alive_progress import alive_bar
+
+# Set-up logging.
+
+logger = logging.getLogger( __name__ )
+file_handler = logging.FileHandler( './blocklists.log' )
+file_handler.setFormatter( logging.Formatter( '%(asctime)s::%(levelname)s::'
+                                            '%(name)s::%(funcName)s::'
+                                            '%(lineno)d::(message)s' ) )
+file_handler.setLevel( logging.DEBUG )
+logger.addHandler( file_handler )
+logger.info( "Beginnning processing." )
+
 
 ####### Global Functions ##########
 
@@ -60,12 +79,17 @@ class InputFile( ):
         self.ip6count = 0
         self.total_ipcount = 0
         self.filedata = ""
-        with open( self.file, 'a+' ) as f:
-            self.filedata = f.readlines( )
-        self.domainstring = ""
-        self.ip4string = ""
-        self.ip6string = ""
-        print(f"{self.file} added to the list for processing.")
+        with open( self.file, 'r+' ) as f:
+            self.filedata = f.read( )
+        self.filedata = b'self.filedata'.decode( )
+        self.domain_ips_v4 = []
+        self.domain_ips_v6 = []
+        self.domains_string = f"##{self.filename}\n"
+        self.ips_v4_string = f"##{self.filename}\n"
+        self.ips_v6_string = f"##{self.filename}\n"
+        time.sleep(.25)
+        #print( f"{self.file} added to the list for processing." )
+
 
 
 
@@ -80,271 +104,209 @@ class DomainIpLists:
         self.ipBlocks_v4_file = kwargs['ipBlocks_v4_file']
         self.ipBlocks_v6_file = kwargs['ipBlocks_v6_file']
         self.domainBlocks_file = kwargs['domainBlocks_file']
-        self.inputfileobects = inputdict
         self.domainBlocks = open( self.domainBlocks_file, 'a+' )
         self.ipBlocks_v4 = open( self.ipBlocks_v4_file, 'a+' )
         self.ipBlocks_v6 = open( self.ipBlocks_v6_file, 'a+' )
-        self.ips_v4 = self.ipBlocks_v4.readlines( )
-        self.ipcount_v6 = len( self.ips_v4 )
-        self.domains = self.domainBlocks.readlines( )
-        self.domaincount = len( self.domains )
-        self.ips_v6 = self.ipBlocks_v6.readlines( )
-        self.ipcount_v6 = len( self.ips_v6 )
 
 
 
     @classmethod
-    def optimizeIps( cls ):
+    def optimizeIps( cls, ip4file, ip6file ):
         print( "\nNow optimizing IP blockfile and removing duplicates...." )
-        ipBlocks_v4 = open( cls.ipBlocks_v4_file, 'a+' )
-        ipBlocks_v6 = open( cls.ipBlocks_v6_file, 'a+' )
+        ipBlocks_v4 = open( ip4file, 'a+' )
+        ipBlocks_v6 = open( ip6file, 'a+' )
         # Sort IPs.
-
-        cls.ips_v4 = sorted( cls.ips_v4, key=ipaddress.ip_address )
+        ips_v4 = ipBlocks_v4.readlines( )
+        ips_v6 = ipBlocks_v6.readlines( )
+        ips_v4 = sorted( ips_v4, key=ipaddress.ip_address )
+        ips_v6 = sorted( ips_v6, key=ipaddress.ip_address )
 
         # Optimize the list of IPs for ipset by removing duplicates and compressing addressses into as many contiguous ranges as possible.
         # Then delete the contents of the IP block file to write the optimized contents to it.
 
-        uniqueips_v4 = list( set( cls.ips_v4 ) )
-        print( "\nIP count after removing duplicates:", len( uniqueips_v4 ) )
+        ips_v4 = list( set( ips_v4 ) )
+        ips_v6 = list( set( ips_v6 ) )
+        logger.info( "\nIPv4 count after removing duplicates:", len( ips_v4 ) )
+        logger.info( "\nIPv6 count after removing duplicates:", len( ips_v6 ) )
         time.sleep( 2 )
-        ipsoptimized_v4 = list( ipaddress.collapse_addresses( uniqueips_v4 ) )
+        ips_v4 = ipaddress.collapse_addresses( ips_v4 )
+        ips_v6 = ipaddress.collapse_addresses( ips_v6 )
         time.sleep( 2 )
-        print( "\nEntry count after collapsing ip ranges:", len( ipsoptimized_v4 ) )
-        optimized_str = "####\n"
-        for iprange in ipsoptimized_v4:
-            optimized_str += f"{iprange}\n"
+        ips_v4 = "\n".join( ips_v4 )
+        ips_v6 = "\n".join( ips_v6 )
         ipBlocks_v4.seek( 0 )
         ipBlocks_v4.truncate( )
-        ipBlocks_v4.write( optimized_str )
-        uniqueips_v6 = list( set( cls.ips_v6 ) )
-        print("\nIP count after removing duplicates:", len( uniqueips_v6 ) )
-        time.sleep( 2 )
-        ipsoptimized_v6 = list( ipaddress.collapse_addresses( uniqueips_v6 ) )
-        time.sleep(2)
-        print( "\nEntry count after collapsing ip ranges:", len( ipsoptimized_v6 ) )
-        optimized_str = "####\n"
-        for iprange in ipsoptimized_v6:
-            optimized_str += f"{iprange}\n"
+        ipBlocks_v4.write( ips_v4 )
+        ipBlocks_v4.flush( )
         ipBlocks_v6.seek(0)
         ipBlocks_v6.truncate()
-        ipBlocks_v6.write( optimized_str )
-        print( f"{cls.ipcount_v4 + cls.ipcount_v6} IPs including {(cls.ipcount_v4 + cls.ipcount_v6) - (len( cls.ips_v4 ) + len( cls.ips_v6 ) ) } IPs or ranges added to the blockfile." )
-        cmd = f"iprange optimize {ipBlocks_v4}"
-        process = subprocess.Popen( cmd )
-        process.wait( )
-        cmd = f"iprange optimize {ipBlocks_v6}"
-        process = subprocess.Popen( cmd )
-        process.wait( )
-        ipBLocks_v4.close( )
+        ipBlocks_v6.write( ips_v6 )
+        ipBlocks_v6.flush( )
+        ipBlocks_v4.close( )
+        ipBlocks_v6.close( )
+        os.system( f"iprange optimize {ip4file}" )
+        os.system( f"iprange optimize {ip6file}" )
 
     # Optimize the list of domains by eliminating duplicates and sorting them alphabetically before
     # deleting the contents of the blockfile and writing the optimized contents to it.
 
     @classmethod
-    def optimizeDomains( cls ):
+    def optimizeDomains( cls, file ):
+        domainBlocks_file = file
         print( '\n\nNow optimizing the domain block file by removing duplicate entries and ordering the entries alphabetically.' )
-        domainBlocks = open( cls.domainBlocks_file, 'a+' )
+        domainBlocks = open( domainBlocks_file, 'a+' )
         domains = domainBlocks.readlines( )
-        domains = list( set( cls.domains ) )
-        domains = sorted( cls.domains )
+        domains = set( domains )
+        domains = sorted( domains )
+        domaincount = len( domains )
         domainBlocks.seek( 0 )
         domainBlocks.truncate( )
-        domains_str = ""
-        for domain in cls.domains:
-            domains_str += f"{domain}\n"
-        cls.domainBlocks.write( domains_str )
-        cls.domainBlocks.flush( )
-        cls.domainBLocks.close
-        print( cls.domaincount, "domains added to the block file.\n" )
+        domains = "\n".join( domains )
+        domainBlocks.write( domains )
+        domainBlocks.flush( )
+        domainBlocks.close
+        logger.info( f"{domaincount} domains optimized in the block file.\n" )
 
     # Take a line of input, remove any 0.0.0.0 entries, search for another existent IP Address in the line,
     # and add it to the IP blockfile and the list of IPs. Stop processing the function by returning
     # True if an IP is found, written and appended to the IP list.
 
     @classmethod
-    def processDomains( cls, inputfile, ipv4blocks, ipv6blocks, domainblocks ):
-        file_ip4count = 0
-        file_ips_v4 = []
-        file_ips_v6 = []
-        file_domains = []
-        file_ip6count = 0
-        file_domaincount = 0
-        ip4string = f"###{inputfile}\n"
-        ip6string = f"###{inputfile}\n"
-        domainstring = f"###{inputfile}\n"
-        print( f"\nProcessing {inputfile} for IP addresses and extracting domains...")
-        with open( Path( inputfile ), 'r+' ) as f:
-            inputdata = f.readlines( )
-            inputlength = len( inputdata )
+    def processIPs( cls, inputfile ):
+        file = inputfile
+        logger.info( f"\nProcessing {file.filename} for IP addresses and extracting domains...")
+        match_v4 = re.compile(r"(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9])\.){3}(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9]))(?:\/(?:[12]?[0-9]|3[0-2]))?", re.IGNORECASE )
 
-            print( f"Length: {inputlength}" )
-            time.sleep(3)
-        print( f"\nRead file {inputfile}!")
-        for string in inputdata:
-            print( f"string: {string}")
-            match_v4 = re.compile(r"(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9])\.){3}(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9]))(?:\/(?:[12]?[0-9]|3[0-2]))?",
-                re.IGNORECASE )
-            res1 = match_v4.findall( string )
-            match_v6 = re.compile(
-                r"^((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|:(?::[0-9A-Fa-f]{1,4}){1,7}|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,6}))$",
-                re.IGNORECASE )
-            res2 = match_v6.findall( string )
-            match_v6_cidr = re.compile(
-                r"(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])",
-                re.IGNORECASE )
-            res3 = match_v6_cidr.findall( string )
-            combinedv6 = res2 + res3
-            print( f"\n\n RegEx Match: Completed line regular expression searches for the following text: {string}")
-            for address in res1:
-                if address != '0.0.0.0':
-                    file_ip4count += 1
-                    file_ips_v4.append( address )
-                    print( f"\n\nIP4: Added ipsv4 to the file ip lists." )
-                    global ips_v4
-                    ips_v4.append( address )
-                    global ipv4_count
-                    ipv4_count += 1
-                    print( f"\n\nIP4: Added ipsv4 to the global ip lists." )
+        match_v6 = re.compile(r"^((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|:(?::[0-9A-Fa-f]{1,4}){1,7}|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,6}))$", re.IGNORECASE )
+        match_v6_cidr = re.compile(r"(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])", re.IGNORECASE )
+        time.sleep(90)
+        t1 = match_v4.findall( file.filedata )
+        t2 = match_v6.findall( file.filedata )
+        t3 = match_v6_cidr.findall( file.filedata )
+        combinedv6 = t2 + t3
+        logger.info( f"RegEx Match: Completed line regular expression searches.")
+        for address in t1:
+            if address != "0.0.0.0":
+                file.ip4count += 1
+                file.ips_v4.append( address )
+                logger.info( f"IP4: Added ipsv4 to the file ip lists." )
+            for address in combinedv6:
+                file.ip6count += 1
+                file.ips_v6.append( address )
+                logger.info( f"\nIP6: Added ipsv6 to the file ip lists." )
+        for ip in file.ips_v4:
+            file.ips_v4_string += f'{ip}\n'
+        for ip in file.ips_v6:
+            file.ips_v6_string += f'{ip}\n'
 
-                for address in combinedv6:
-                    file_ip6count += 1
-                    file_ips_v6.append( address )
-                    print( f"\nIP6: Added ipsv6 to the file ip lists." )
-                    global ips_v6
-                    ips_v6.append( address )
-                    global ipv6_count
-                    ipv6_count += 1
-                    print( f"\nIP6: Added ipsv6 to the global ip lists." )
+        # Report file totals.
 
-            # Now search the line for domain, subdomains, and tld, add the group to the domain blocklist.
-            extractor = URLExtract( )
-            urls = extractor.find_urls( string )
-            print( f"\nExtracted the following URLs form the string: {urls} .")
-            for url in urls:
-                url = url.replace("http://", "" )
-                url = url.replace( "https://", "" )
-                bar_search = re.compile( r"^||.*")
-                bars = bar_search.findall(url)
-                if bars:
-                     url = url[2:]
-                url = url.replace( "||", "" )
-                url = url.replace( '\n', "" )
-                url = url.strip( )
-                url = url.strip( "\n" )
-                url = url.strip( "||" )
-                spliturl = url.split( '/' )
-                spliturl = spliturl[0]
-                print( f"\nspliturl {spliturl}")
-                if "http" or "https" not in spliturl:
-                    if str(spliturl[0]) != "0.0.0.0":
-                        res4 = match_v4.findall(spliturl)
-                        res5 = match_v6.findall(spliturl)
-                        res6 = match_v6_cidr.findall(spliturl)
-                        if res4:
-                            pass
-                        if res5:
-                            pass
-                        if res6:
-                            pass
-                        #match_v4 = re.compile(
-                        #    r"(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9])\.){3}(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9]))(?:\/(?:[12]?[0-9]|3[0-2]))?", re.IGNORECASE )
-                        #res1 = match_v4.findall( string )
-                        #match_v6 = re.compile(
-                        #    r"^((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|:(?::[0-9A-Fa-f]{1,4}){1,7}|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,6}))$", re.IGNORECASE )
-                        #res2 = match_v6.findall( string )
-                        #match_v6_cidr = re.compile(
-                        #    r"(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])", re.IGNORECASE )
-                        #res3 = match_v6_cidr.findall( string )
-                        #print( f"\n\nRegEx Elim: Completed processing of regex for doomain elimination in string: {string} .")
-                        #time.sleep(.8)
-                        #if res1:
-                        #    pass
-                        #elif res2:
-                        #    pass
-                        #elif res3:
-                        #    pass
-                        elif spliturl == "http:":
-                            pass
-                        elif spliturl == "https:":
-                            pass
-                        else:
-                            global domains
-                            print( f"\n\nDomain Add: Adding domain: {spliturl} to the domain blocklist.")
-                            domains.append( spliturl )
-                            file_domains.append(spliturl)
-                            file_domaincount += 1
-            #else:
-             #   continue
-        for domain in file_domains:
-            global domains_string
-            domains_string += f'{domain}\n'
-            print( f"\n\nGlobal Domains: Adding domain {domain} to the domain string globally." )
-        for ip in file_ips_v4:
-            global ips_v4_string
-            ips_v4_string += f'{ip}\n'
-            print( f"\n\nGlobal IPv4: Adding ip address {ip} to the IPv4 string globally.")
-        for ip in file_ips_v6:
-            global ips_v6_string
-            ips_v6_string += f'{ip}\n'
-            print( f"\n\nGLobal IPv6:Adding ip {ip} to the IPv6 string globally.")
+        logger.info( f"Raw IP Processing complete for file: {inputfile}" )
+
+    @classmethod
+    def processDomains( cls, inputfile ):
+        file = inputfile
+        logger.info( f"\nProcessing {file.filename} and extracting domains...")
+
+        match_v4 = re.compile(r"(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9])\.){3}(?:(?:2(?:[0-4][0-9]|5[0-5])|[0-1]?[0-9]?[0-9]))(?:\/(?:[12]?[0-9]|3[0-2]))?", re.IGNORECASE )
+        match_v6 = re.compile(r"^((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|:(?::[0-9A-Fa-f]{1,4}){1,7}|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,6}))$", re.IGNORECASE )
+        match_v6_cidr = re.compile(r"(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])", re.IGNORECASE )
+
+        # Now search the text for urls, discard IP addresses, and add the sanitized group to the domain blocklist.
+        file.filedata = ''.join( file.filedata )
+        extractor = URLExtract( allow_mixed_case_hostname = True, limit = 50000, cache_dns = True )
+        try:
+            extractor.update( )
+        except Exception as err:
+            print("Caught an exception:")
+            traceback.print_exc()
+            logger.info(traceback.print_exc())
+
+        urls = extractor.find_urls( file.filedata, only_unique = True, check_dns = True  )
+        logger.info( f"\nExtracted the following URLs form the text: {urls} .")
+        for url in urls:
+            url = url.replace("http://", "" )
+            url = url.replace( "https://", "" )
+            bar_search = re.compile( r"^||.*")
+            bars = bar_search.findall(url)
+            if bars:
+                 url = url[2:]
+            url = url.replace( "||", "" )
+            url = url.replace( '\n', "" )
+            url = url.strip( )
+            url = url.strip( "\n" )
+            url = url.strip( "||" )
+            rem_char = "|"
+            url = url.replace( rem_char, "" )
+            if "localhost" in url:
+                pass
+            spliturl = url.split( '/' )
+            spliturl = spliturl[0]
+            logger.info( f"\nspliturl {spliturl}")
+            if "http" or "https" not in spliturl:
+                if str(spliturl[0]) != "0.0.0.0":
+                    res4 = match_v4.findall(spliturl)
+                    res5 = match_v6.findall(spliturl)
+                    res6 = match_v6_cidr.findall(spliturl)
+                    if res4:
+                        pass
+                    if res5:
+                        pass
+                    if res6:
+                        pass
+                    elif spliturl == "http:":
+                        pass
+                    elif spliturl == "https:":
+                        pass
+                    else:
+                        logger.info( f"\n\nDomain Add: Adding domain: {spliturl} to the domain blocklist.")
+                        file.domains.append( spliturl )
+                        file.domaincount += 1
+                        file.domains_string += f'{domain}\n'
+                        logger.info( f"\n\nGlobal Domains: Adding domain {domain} to the domain string globally." )
+
 
         # Report file totals.
         global total_ipcount
-        total_ipcount += file_ipv4_count + file_ipv6_count
-        print( f"\n\nAll parsing completed for File : {inputfile.filename} processed.\n\n\nThe following {file_domaincount} domains were added to the blocklist:\n {file_domains}\n\nThe following {file_ip4count} IPv4 addresses were added to the blocklist: \n{file_ips_v4}\n\nThe following {file_ip6count} IPv6 addresses were added to the blocklist: \n{file_ips_v6}\n\n...... {total_ipcount} IP addresses added to the blocklists thusfar." )
-        return 0
+        total_ipcount += file.ip4count + file.ip6count
+        print( f"Parsing completed for file: {inputfile.filename} . " )
+        logger.info( f"\n\nAll parsing completed for File : {inputfile} processed.\n\n\nThe following {inputfile.domaincount} domains were added to the blocklist:\n {inputfile.domains}\n\nThe following {inputfile.ip4count} IPv4 addresses were added to the blocklist: \n{inputfile.ips_v4}\n\nThe following {inputfile.ip6count} IPv6 addresses were added to the blocklist: \n{inputfile.ips_v6}\n\n...... {total_ipcount} IP addresses added to the blocklists thusfar." )
+
 
     # Attempt to lookup the given domain name in each line and find associated IP address records,
     # without failure if no result or an error is returned. Write associated IPs to the IP blocklist
-    # and blockfile.
+    # and blockfile..
 
     @classmethod
-    def ipLookup( cls, domain ):
+    def ipLookup( cls, fileobj):
         try:
-            domain_ipsv4 = []
-            domain_ipsv6 = []
-            domain_ipv4_count = 0
-            domain_ipv6_count = 0
-            domainip4string = f"##{domain}\n"
-            domainip6string = f"##{domain}\n"
-            hostinfo = socket.gethostbyname_ex( domain )
-            print(f"\nRerieving IP addresess(es) for domain {domain}...")
-            [ ( print( f"\nIP address(es): {hostinfo[2]} added to the ip block file." ) ) for address in hostinfo[2] if hostinfo[2] is not None and address not in ips_v4 ]
-            for address in hostinfo[2]:
-                if hostinfo[2] is not None:
-                    if address not in file_ips_v4:
-                        domain_ipv4_count += 1
-                        print( f"Adding IPv4 address {address} to the blocklist for domain {domain}" )
-                        domain_ipsv4.append( address )
-                        global ips_v4
-                        global ipv4_count
-                        ipv4_count += 1
-                        ips_v4.append( address )
-                        domainip4string += f"{address}\n"
-            hostaddrinfo = socket.getaddrinfo( domain, None,  socket.AF_INET6 )
-            for address in hostaddrinfo[0]:
-                if hostaddrinfo[0] is not None:
-                    if address not in domain_ips_v6:
-                        domain_ipv6_count += 1
-                        print( f"Adding IPv6 address {address} to the blocklist for domain {domain}" )
-                        domain_ipsv6.append( address )
-                        global ips_v6
-                        global ipv6_count
-                        ipv6_count += 1
-                        ips_v6.append( address )
-                        domainip6string += f"{address}\n"
-            global ips_v4_string
-            ips_v4_string += domainip4string
-            global ips_v6_string
-            ips_v6_string += domainip6string
-
+            file = fileobj
+            for domain in file.domains:
+                hostinfo = socket.gethostbyname_ex( domain )
+                print( f"\nRerieving IP addresess(es) for domain {domain}..." )
+                [ ( print( f"\nIP address(es): {hostinfo[2]} added to the ip block file." ) ) for address in hostinfo[2] if hostinfo[2] is not None and address not in ips_v4 ]
+                for address in hostinfo[2]:
+                    if hostinfo[2] is not None:
+                        if address not in file.ips_v4:
+                            file.ip4count += 1
+                            logger.info( f"Adding IPv4 address {address} to the blocklist for domain {domain}" )
+                            file.ips_v4.append( address )
+                            file.ipv4_string += f"{address}\n"
+                hostaddrinfo = socket.getaddrinfo( domain, None,  socket.AF_INET6 )
+                for address in hostaddrinfo[0]:
+                    if hostaddrinfo[0] is not None:
+                        if address not in file.ips_v6:
+                            file.ip6count += 1
+                            print( f"Adding IPv6 address {address} to the blocklist for domain {domain}" )
+                            file.ips_v6.append( address )
+                            file.ipv6_string += f"{address}\n"
 
         # Print any exception caught in the process
 
         except Exception as err:
             print( "Caught an exception:" )
             traceback.print_exc( )
+            logger.info( traceback.print_exc( ) )
             print( "Program continues to run after the traceback." )
 
 
@@ -465,9 +427,8 @@ class IpsetBlocklist:
         return format_string.format(name, self.range, family, maxelem )
 
     # ipset restore the filename
-
     @classmethod
-    def restoreIpsetFile(cls, filename):
+    def restoreIpsetFile( cls, filename ):
         cmd = "ipset -exist -f {} restore".format( filename ).split( " " )
 
         process = subprocess.Popen( cmd )
@@ -492,7 +453,7 @@ class IpsetBlocklist:
         for i in range(1, ( self.element_groups_v6 ) ):
             ip6set_name = "{}-{}".format(lists.args.ipset6_name, i )
             ip6set_names.append( ip4set_name )
-        return "{}{}".format( ip4set_names ), "{}{}".format( ip6set_names )
+        return "{}{}".format( ipset4_names ), "{}{}".format( ip6set_names )
 
     # Destroy existing ipsete
 
@@ -662,10 +623,9 @@ class IpsetBlocklist:
 
         print( "{} IPs added to the ipsets".format( ipcount ) )
 
-###### Main portion of the script using the above classes ######
-
 #Global Vairables
 
+inputfileobjects = {}
 domains = []
 domain_ip4_string = ""
 domain_ip6_string = ""
@@ -674,13 +634,40 @@ ips_v6_string = ""
 domains_string = ""
 ips_v4 = []
 ips_v6 = []
+domaincount = 0
 ipv4_count = 0
 total_ipcount = 0
 ipv6_count = 0
-def main( ):
-    try:
 
-        # Parse arguments passed to the script and, if necessary, gather missing data.
+
+# Global functions
+
+# Create inputfile objects
+
+def createInputObjects( items ):
+    logger.info( "\n\nCreating input file objects...")
+    print( "\n\nCreating input file objects...\n" )
+    with alive_bar( len( items ), title = 'Processing', length = 100, bar = 'fish', spinner = 'fishes' ) as bar:
+        count = 0
+        global inputfileobjects
+        for item in items:
+            bar.text( f"Processing item: {item}..." )
+            inputfilename = f"input{count}"
+            inputfileobjects[inputfilename] = InputFile(item)
+            count += 1
+            time.sleep(.5)
+            bar()
+
+###### Main portion of the script using the above classes ######
+
+
+def main( ):
+
+    print( "\n\nProcessing given input to create or update blocklists!" )
+    time.sleep(1.5)
+    print( "       \n\n\n...if problems are encountered, check the current directory for blocklists.log! " )
+
+    try:
 
         parser = argparse.ArgumentParser(
             prog='blocklists.py',
@@ -689,51 +676,55 @@ def main( ):
             usage='%(prog)s [options]'
         )
         parser.add_argument('-f', '--files', default='',
-                                 help="input blocklist filename(s) or directories, comma-separated")
-        parser.add_argument('-6', '--ipv6', default='0', help="optional IPv6 processing (Default = No)")
+                                 help="input blocklist filename(s) or directories, comma-separated" )
+        parser.add_argument('-6', '--ipv6', default='0', help="optional IPv6 processing (Default = No)" )
         parser.add_argument('-i', '--interactive', default='1',
-                                 help="interactive mode will ask for values for needed variables and about including operations")
-        parser.add_argument('-is', '--ipset', default='0', help="create ipset blocklists")
+                                 help="interactive mode will ask for values for needed variables and about including operations" )
+        parser.add_argument('-is', '--ipset', default='0', help="create ipset blocklists" )
         parser.add_argument('-in4', '--ipset4_name', default='blocklists-set',
-                                 help="ipset IPv4 blocklist name or name prefix")
+                                 help="ipset IPv4 blocklist name or name prefix" )
         parser.add_argument('-in6', '--ipset6_name', default='blocklists-set',
-                                 help="ipset IPv6 blocklist name or name prefix")
+                                 help="ipset IPv6 blocklist name or name prefix" )
         parser.add_argument('-il', '--ipset_location', default='/etc/ipset',
-                                 help="ipset config file location (Default: /etc/ipset)")
+                                 help="ipset config file location (Default: /etc/ipset)" )
         parser.add_argument('-oi4', '--output_ip_list_v4', default='',
-                                 help="output IPv4 blocklist filename or directory")
+                                 help="output IPv4 blocklist filename or directory" )
         parser.add_argument('-oi6', '--output_ip_list_v6', default='',
-                                 help="output IPv6 blocklist filename or directory")
+                                 help="output IPv6 blocklist filename or directory" )
         parser.add_argument('-od', '--output_domain_list', default='',
-                                 help="output domain blocklist filename or directory")
+                                 help="output domain blocklist filename or directory" )
         parser.add_argument('-ipt', '--iptables_rules', default='0',
-                                 help="add iptables rules to firewall. The default blocks incoming and outgoing traffic across all connections to or from those ips.")
+                                 help="add iptables rules to firewall. The default blocks incoming and outgoing traffic across all connections to or from those ips." )
         parser.add_argument('-ipto', '--iptables_options', default='-j DROP',
-                                 help="iptables options to customize the rule, the ipset name(s) taken from the supplied argument. When using this options all flags beyond the ipset name for the rule need to be included. These include things like tables, direction, actions, ports.")
-        args = parser.parse_args()
+                                 help="iptables options to customize the rule, the ipset name(s) taken from the supplied argument. When using this options all flags beyond the ipset name for the rule need to be included. These include things like tables, direction, actions, ports." )
+        parser.add_argument('-ad', '--allowed_domains', default='',
+                            help="A file containing allowed domains that shall not be blocked, one per line.")
+        parser.add_argument('-ai', '--allowed_ips', default='',
+                            help="a list containing ips or subnets that shall not be blocked, one per line. These include private networks by default.")
+        args = parser.parse_args( )
 
         # When in interactive mode, ather essentail inputs and determine if the user would like ipsets created, config files written, etc.
 
         if args.interactive == 1:
-            args.files = input("Please enter a comma-separated list of directories or files to be parsed: ")
-            args.output_domain_list = input("Please enter the name of the output domain block file: ")
-            args.output_ip_list_v4 = input("Please enter the name of the output IPv4 block file: ")
-            args.output_ip_list_v6 = input("Please enter the name of the output IPv6 block file: ")
-            args.ipset = input("Do you want to create the ipset file int /etc/ipsets? (Y/N)")
+            args.files = input( "Please enter a comma-separated list of directories or files to be parsed: " )
+            args.output_domain_list = input( "Please enter the name of the output domain block file: " )
+            args.output_ip_list_v4 = input( "Please enter the name of the output IPv4 block file: " )
+            args.output_ip_list_v6 = input( "Please enter the name of the output IPv6 block file: " )
+            args.ipset = input( "Do you want to create the ipset file int /etc/ipsets? (Y/N)" )
 
             # Gain root privileges if we are doing operations that require it.
 
             if args.ipset == 'Y' or 'y' or 1:
                 args.ipset4_name = input(
-                    "Please provide a name for the ipset(s) to be created (Default blocklists-ipset_v4-{number}): ")
+                    "Please provide a name for the ipset(s) to be created (Default blocklists-ipset_v4-{number}): " )
                 args.ipset6_name = input(
-                    "Please provide a name for the ipset(s) to be created (Default blocklists-ipset_v6-{number}): ")
+                    "Please provide a name for the ipset(s) to be created (Default blocklists-ipset_v6-{number}): " )
                 args.ipset_location = input(
-                    "Please provide a folder where the output ipset files should be placed (Default /etc/ipset.d): ")
+                    "Please provide a folder where the output ipset files should be placed (Default /etc/ipset.d): " )
                 args.iptables_rules = input(
-                    "Shall the script create iptables rules for the ipset(s) created? (Y/N [default]) ")
+                    "Shall the script create iptables rules for the ipset(s) created? (Y/N [default]) " )
                 args.iptables_options = input(
-                    "Enter iptables options to be appended after the ipset name in the rules, or hit [Enter] for the default incoming and outgoing block: ")
+                    "Enter iptables options to be appended after the ipset name in the rules, or hit [Enter] for the default incoming and outgoing block: " )
                 while os.geteuid() != 0:
                     print(
                         "\n[sudo] password for %u required to run this script with currently given options. \n\nPlease enter your sudo password:")
@@ -748,39 +739,34 @@ def main( ):
         # If minimal arguments are not supplied and the script is not in interactive mode, explain what is missing and exit.
 
         if args.files == '':
-            raise ('\n\nRequired input files or directories not given. Exiting.')
+            raise ( '\n\nRequired input files or directories not given. Exiting.' )
         if args.output_ip_list_v6 == '' and args.ipv6 == 1:
-            raise ("Output IPv6 list filename not given. Exiting.")
+            raise ( "Output IPv6 list filename not given. Exiting." )
         else:
             if args.ipv6 == 1 or 'Y' or 'y':
-                output_ip_list_v6 = Path(args.output_ip_list_v6)
+                output_ip_list_v6 = Path( args.output_ip_list_v6 )
             else:
                 pass
         if args.output_ip_list_v4 == '':
-            raise ("Output IPv4 list filename not given. Exiting.")
+            raise ( "Output IPv4 list filename not given. Exiting." )
         else:
-            output_ip_list_v4 = Path(args.output_ip_list_v4)
+            output_ip_list_v4 = Path( args.output_ip_list_v4 )
         if args.output_domain_list == '':
-            raise ("Output domain list filename not given. Exiting.")
+            raise ( "Output domain list filename not given. Exiting." )
         else:
-            output_domain_list = Path(args.output_domain_list)
+            output_domain_list = Path( args.output_domain_list )
 
         # Parse user input for filenames and directories, adding any files to the list to parse.
 
-        userInput = args.files.split(",")
+        userInput = args.files.split( "," )
         items = []
         for thing in userInput:
-            for item in Path(thing).rglob('*'):
-                if item.is_file():
-                    items.append( str( item ) )
-
-                    time.sleep(0.05)
+            for item in Path( thing ).rglob( '*' ):
+                if item.is_file( ):
+                    items.append( item )
+                    logger.info( f"Adding {item} to the list of files to parse." )
         count = 0
-        inputfileobjects = {}
-        for item in items:
-            inputfilename = f"input{count}"
-            inputfileobjects[inputfilename] = InputFile(item)
-            count += 1
+        createInputObjects( items )
         lists = DomainIpLists( inputfileobjects, domainBlocks_file = args.output_domain_list, ipBlocks_v4_file = args.output_ip_list_v4, ipBlocks_v6_file = args.output_ip_list_v6 )
         ipsets = IpsetBlocklist( lists, inputfileobjects, domainBlocks_file = args.output_domain_list, ipBlocks_v4_file = args.output_ip_list_v4, ipBlocks_v6_file = args.ipBlocks_v6_file, ipset4_name = args.ipset4_name, ipset6_name = args.ipset6_name, ipset_location = args.ipset_location )
 
@@ -789,41 +775,57 @@ def main( ):
 
         time.sleep( 2 )
         if args.interactive == 1:
+            logger.info( "Interactive mode selected by user.")
             goahead :str = input( 'Proceed? (Y/N) ' )
             while True:
                 if goahead == 'Y' or goahead == "y":
+                    logger.info( "User has accepted the script's options and the script continues." )
                     break
                 elif goahead == 'N' or goahead == 'n':
                     raise( '\nUser aborted processing.' )
+                    logger.info( "User has declined the script's options and the script exits." )
                 else:
                     goahead = input( '\nInvalid entry. Please select Y, N, y, or n.\n\nProceed? (Y/N)' )
         time.sleep( 2 )
 
 
         # Parse the input, and create the blocklists in per-input-file parallel operations.
-
-        processlist = []
-        for inputfile in items:
-            processtuple = ( inputfile, args.output_ip_list_v4, args.output_ip_list_v6, args.output_domain_list )
-            processlist.append( processtuple )
+        print( "\n\nBeginning to process files. This may take a while...\n\n" )
+        logger.info("\n\nBeginning to process files. This may take a while...\n\n")
+        logger.info( "Starting IP processing..." )
         mp.set_start_method( 'spawn', force = True )
-        with mp.Pool( processes = mp.cpu_count( ) ) as pool:
-            print( "\n\nBeginning to process files. This may take a while...\n\n" )
-            pool.starmap(lists.processDomains, processlist)
+        with mp.Pool( processes = 4 ) as pool:
+            with alive_bar( len( items ), title = 'Finding IPs...', length = 100, bar = 'fish', spinner = 'fishes' ) as bar, mp.Pool( processes = mp.cpu_count( ) ) as pool:
+                for _ in pool.map( lists.processIPs, inputfileobjects.values( ) ):
+                    bar.text( f"Processing file..." )
+                    bar( )
+            with alive_bar(len(items), title='Finding Domains...', length=100, bar='fish', spinner='fishes') as bar, mp.Pool(processes=mp.cpu_count()) as pool:
+                for _ in pool.map(lists.processDomains, inputfileobjects.values( ) ):
+                    bar.text(f"Processing file...")
+                    bar()
+            with alive_bar(len(items), title='Finding IPs by domain...', length=100, bar='fish', spinner='fishes') as bar, mp.Pool(processes=mp.cpu_count()) as pool:
+                for _ in pool.map(lists.ipLookup, inputfileobjects.values()):
+                    bar.text(f"Processing domain list... ")
+                    bar()
+                logger.info( "IP lookup complete.\n\nNow beginning to write ipsets.\n\n" )
             with open( args.output_domain_list, 'a+' ) as domainBlocks:
                 with open( args.output_ip_list_v4, 'a+') as ipBlocks_v4:
-                    with open( args.output_ip_list_v6, 'a+' ) as ipBLocks_v6:
-                        ipBlocks_v4.write( ips_v4_string )
-                        ipBLocks_v6.write( ips_v6_string )
-                        domainBlocks.write( domains_string )
-            print( "Processing domains complete.\n\nNow beginning ip lookup. This could take a while...\n\n" )
-            with open( args.domainBlocks_file, 'r+' ) as domainBlocks:
-                domainslist = domainBlocks.readlines( )
-                pool.map(lists.ipLookup, domainslist)
-                with open( args.output_ip_list_v4, 'a+') as ipBLocks_v4:
-                    ipBLocks_v4.write( domain_ip4_string )
-                with open( args.output_ip_list_v6, 'a+') as ipBLocks_v6:
-                    ipBLocks_v6.write( domain_ip6_string )
+                    with open( args.output_ip_list_v6, 'a+' ) as ipBlocks_v6:
+                        domaindata = domainBlocks.read( )
+                        domaindata ="".join(domaindata)
+                        domaindata = domaindata.split( "\n" )
+                        global domains
+                        domains = domaindata
+                        global domaincount
+                        domaincount += len( domaindata )
+                        for o in inputfileobjects.values( ):
+
+                            ipBlocks_v4.write( o.ips_v4_string )
+                            ipBlocks_v6.write( o.ips_v6_string )
+                            domainBlocks.write( o.domains_string )
+                            domainBlocks.flush( )
+                            ipBlocks_v4.flush( )
+                            ipBlocks_v6.flush( )
         time.sleep( 2 )
 
         # Optimize the output files for human readability and machine-efficiency.
@@ -831,37 +833,34 @@ def main( ):
         # them with sorted, condensed versions thereof.
 
         print( '\n\nOptimizing blocklists...' )
-        lists.optimizeDomains( domainBlocks_file = args.output_domain_list )
-        lists.optimizeIps( ipBLocks_v4_file = args.ipBlocks_v4_file, ipBlocks_v6_file = args.ipBlocks_v6_file )
+        logger.info( "Optimizing blocklists, starting with the domain blocklists..." )
+        lists.optimizeDomains( args.output_domain_list )
+        logger.info( "Now optimizing the iplists and condensing the networks into as few entries as possible..." )
+        lists.optimizeIps( args.output_ip_list_v4, args.output_ip_list_v6 )
+        logger.info("Optimizations complete.")
         time.sleep( 2 )
-        lists.domainBlocks.flush( )
-        lists.domainBlocks.close( )
-        lists.ipBlocks_v4.flush( )
-        lists.ipBlocks_v4.close( )
-        lists.ipBlocks_v6.flush( )
-        lists.ipBlocks_v6.close( )
 
         # If the user selected to create the ipset blocklists, process and create them.
 
 
-        if lists.input.args.ipset == 'Y' or 'y' or 1:
-            ipset = IpsetBLocklists( args )
-            ipset.processIpsets( )
-
+        if args.ipset == 'Y' or 'y' or 1:
+            logger.info( "Creating ipsets..." )
+            print( "\n\nNow processing IPsets. Please standby. This should only take a second or two...\n\n            ...\n                                                   ...\n\n                                                   ..." )
+            ipsets.processIpsets()
+            time.sleep( 2 )
+            print( "\n\n\nProcessing Ipsets completed." )
         # Le fin.
 
         print( '\n\nProcessing complete.' )
-
+        logger.info( "Processing complete." )
     # ...but I am le tired.
 
     except Exception as err:
-        tmpdom = r"\/tmp\/dom.*"
         tmpip = r"\/tmp\/ip.*"
-        os.remove( "/tmp/ipsetvars" )
-        os.remove( tmpdom )
         os.remove( ipdom )
         print( "Caught an exception:" )
         traceback.print_exc( )
+        logger.info( traceback.print_exc( ) )
 
 # Execution control section
 

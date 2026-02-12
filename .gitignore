@@ -11,3 +11,4 @@ venv/
 ips_v4
 ips_v6
 domains
+./*.log
