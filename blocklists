@@ -237,6 +237,8 @@ class DomainIpLists:
             url = url.replace( rem_char, "" )
             if "localhost" in url:
                 continue
+            sep ="/"
+            url = url.split(sep,1 )[0]
             print(f"url before split: {url}")
             time.sleep(.3)
             spliturl = url.split( '/' )
@@ -248,19 +250,20 @@ class DomainIpLists:
                     res5 = match_v6.findall(spliturl)
                     res6 = match_v6_cidr.findall(spliturl)
                     if res4 or res5 or res6:
+                        print( f"Found IP dress {res4}{res5}{res6}, skipping")
                         pass
                     elif spliturl == "http:":
                         pass
                     elif spliturl == "https:":
                         pass
                     else:
-                        logger.info( f"\n\nDomain Add: Adding domain: {spliturl} to the domain blocklist.")
+                        logger.info( f"\n\nDomain Add: Adding domain: {spliturl} to the domain blocklist." )
                         file.domains.append( spliturl )
                         file.domaincount += 1
                         file.domains_string += f'{spliturl}\n'
                         logger.info( f"\n\nGlobal Domains: Adding domain {spliturl} to the domain string globally." )
 
-        print( f"Domains in file:  {domains}\n\nDomain count: {domaincount}")
+        print( f"Domains in file:  {domains}\n\nDomain count: {domaincount}" )
         # Report file totals.
         global total_ipcount
         total_ipcount += file.ip4count + file.ip6count
