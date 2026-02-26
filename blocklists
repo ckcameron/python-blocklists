@@ -26,6 +26,8 @@
 
 import http.client
 import itertools
+import urllib.request
+import urllib.error
 import socket
 import ssl
 import subprocess
@@ -57,11 +59,118 @@ file_handler.setLevel( logging.DEBUG )
 logger.addHandler( file_handler )
 logger.info( "Beginning processing." )
 
+# Default curated blocklist URLs for the -dl / --default_lists option.
+# Each entry is a ( name, url ) tuple. The name is used for logging, progress output, and temp file naming.
+
+DEFAULT_BLOCKLISTS = [
+    # Malware / Threat Intelligence
+    ( "abuse-ch-feodo-ipblocklist",
+      "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt" ),
+    ( "abuse-ch-sslbl-ipblocklist",
+      "https://sslbl.abuse.ch/blacklist/sslipblacklist.txt" ),
+    ( "abuse-ch-urlhaus-domains",
+      "https://urlhaus.abuse.ch/downloads/text_online/" ),
+    ( "emerging-threats-compromised-ips",
+      "https://rules.emergingthreats.net/blockrules/compromised-ips.txt" ),
+    ( "emerging-threats-block-ips",
+      "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt" ),
+    # Ad / Tracking Domains
+    ( "stevenblack-hosts",
+      "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" ),
+    ( "peter-lowe-adservers",
+      "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext" ),
+    # Phishing / Fraud
+    ( "openphish-feed",
+      "https://openphish.com/feed.txt" ),
+    ( "phishing-army-blocklist",
+      "https://phishing.army/download/phishing_army_blocklist.txt" ),
+    # Mixed IP + Domain
+    ( "blocklist-de-all",
+      "https://lists.blocklist.de/lists/all.txt" ),
+    ( "stamparm-ipsum-level1",
+      "https://raw.githubusercontent.com/stamparm/ipsum/master/levels/1.txt" ),
+    ( "cinsscore-badguys",
+      "https://cinsscore.com/list/ci-badguys.txt" ),
+]
+
 
 ####### Global Functions ##########
 
 def eprint(*args, **kwargs):
     print( *args, file=sys.stderr, **kwargs )
+
+# Download blocklist content from a list of ( name, url ) tuples.
+# Returns a list of Path objects pointing to temporary files containing the downloaded content.
+# Failed downloads are logged and skipped without halting the process.
+
+def download_blocklists( urls ):
+    downloaded_files = []
+
+    print( f"\n\nDownloading {len( urls )} blocklist(s) from the internet...\n" )
+    logger.info( f"Beginning download of {len( urls )} blocklist URL(s)." )
+
+    with alive_bar( len( urls ), title = 'Downloading blocklists...', length = 100,
+                    bar = 'fish', spinner = 'fishes' ) as bar:
+        for name, url in urls:
+            bar.text( f"Downloading: {name}..." )
+            try:
+                req = urllib.request.Request( url, headers = {
+                    'User-Agent': 'blocklists/1.0 (https://github.com/ckcameron/python-blocklists)'
+                })
+                response = urllib.request.urlopen( req, timeout = 30 )
+                content = response.read( )
+
+                if not content:
+                    print( f"  Warning: Empty response from {name} ({url}). Skipping." )
+                    logger.warning( f"Empty response from {name}: {url}" )
+                    bar( )
+                    continue
+
+                # Decode content, handling common encodings.
+                try:
+                    text = content.decode( 'utf-8' )
+                except UnicodeDecodeError:
+                    text = content.decode( 'latin-1' )
+
+                # Write to a named temporary file that persists until explicit cleanup.
+                tmp = tempfile.NamedTemporaryFile(
+                    mode = 'w',
+                    prefix = f'blocklists-dl-{name}-',
+                    suffix = '.txt',
+                    delete = False
+                )
+                tmp.write( text )
+                tmp.flush( )
+                tmp.close( )
+
+                downloaded_files.append( Path( tmp.name ) )
+                logger.info( f"Downloaded {name} ({url}) -> {tmp.name} "
+                             f"({len( text )} bytes)" )
+                print( f"  Downloaded: {name} ({len( text )} bytes)" )
+
+            except urllib.error.HTTPError as e:
+                print( f"  HTTP error downloading {name}: {e.code} {e.reason}" )
+                logger.error( f"HTTP error downloading {name} ({url}): "
+                              f"{e.code} {e.reason}" )
+            except urllib.error.URLError as e:
+                print( f"  Connection error downloading {name}: {e.reason}" )
+                logger.error( f"URL error downloading {name} ({url}): {e.reason}" )
+            except socket.timeout:
+                print( f"  Timeout downloading {name} ({url}). Skipping." )
+                logger.error( f"Timeout downloading {name}: {url}" )
+            except Exception as e:
+                print( f"  Unexpected error downloading {name}: {e}" )
+                logger.error( f"Unexpected error downloading {name} ({url}): {e}" )
+                traceback.print_exc( )
+
+            bar( )
+
+    print( f"\nSuccessfully downloaded {len( downloaded_files )} of "
+           f"{len( urls )} blocklist(s).\n" )
+    logger.info( f"Download phase complete: {len( downloaded_files )} of "
+                 f"{len( urls )} succeeded." )
+
+    return downloaded_files
 
 # Class for inputfiles and associated data
 
@@ -482,6 +591,113 @@ class IpsetBlocklist:
             return False
         return True
 
+    # Check if an iptables/ip6tables rule already exists to avoid duplicates.
+
+    @classmethod
+    def iptablesRuleExists( cls, rule_args, ipv6=False ):
+        cmd_base = "ip6tables" if ipv6 else "iptables"
+        cmd = [cmd_base, "-C"] + rule_args
+        process = subprocess.Popen( cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL )
+        process.wait( )
+        return process.returncode == 0
+
+    # Add a single iptables/ip6tables rule using -I (insert at top of chain).
+
+    @classmethod
+    def addIptablesRule( cls, rule_args, ipv6=False ):
+        cmd_base = "ip6tables" if ipv6 else "iptables"
+        cmd = [cmd_base, "-I"] + rule_args
+        logger.info( f"Adding {cmd_base} rule: {' '.join( cmd )}" )
+        process = subprocess.Popen( cmd )
+        process.wait( )
+        if process.returncode != 0:
+            eprint( f"Adding {cmd_base} rule failed with error {process.returncode}: {' '.join( cmd )}" )
+            logger.error( f"Adding {cmd_base} rule failed with error {process.returncode}: {' '.join( cmd )}" )
+            return False
+        return True
+
+    # Remove a single iptables/ip6tables rule using -D (delete).
+
+    @classmethod
+    def removeIptablesRule( cls, rule_args, ipv6=False ):
+        cmd_base = "ip6tables" if ipv6 else "iptables"
+        cmd = [cmd_base, "-D"] + rule_args
+        logger.info( f"Removing {cmd_base} rule: {' '.join( cmd )}" )
+        process = subprocess.Popen( cmd )
+        process.wait( )
+        if process.returncode != 0:
+            eprint( f"Removing {cmd_base} rule failed with error {process.returncode}: {' '.join( cmd )}" )
+            logger.error( f"Removing {cmd_base} rule failed with error {process.returncode}: {' '.join( cmd )}" )
+            return False
+        return True
+
+    # Add iptables/ip6tables rules for all created ipsets.
+    # For each ipset, creates rules to block:
+    #   - Incoming traffic  (INPUT chain, match on source address)
+    #   - Forwarded traffic (FORWARD chain, match on source address)
+    #   - Outgoing traffic  (OUTPUT chain, match on destination address)
+    # Rules are inserted at the top of each chain so they take priority.
+    # Existing duplicate rules are detected and skipped.
+
+    def addIptablesRules( self, iptables_options="-j DROP" ):
+        options = iptables_options.split( )
+        ipset4_names, ipset6_names = self.nameFormat( self.permanent_ipset_basename_v4 )
+
+        rules_added = 0
+        rules_skipped = 0
+
+        # Add IPv4 rules (iptables)
+        for set_name in ipset4_names:
+            for chain, direction in [( "INPUT", "src" ), ( "FORWARD", "src" ), ( "OUTPUT", "dst" )]:
+                rule_args = [chain, "-m", "set", "--match-set", set_name, direction] + options
+                if self.iptablesRuleExists( rule_args, ipv6=False ):
+                    logger.info( f"iptables rule already exists, skipping: {' '.join( rule_args )}" )
+                    rules_skipped += 1
+                else:
+                    if self.addIptablesRule( rule_args, ipv6=False ):
+                        rules_added += 1
+                        print( f"  Added iptables rule: -I {' '.join( rule_args )}" )
+
+        # Add IPv6 rules (ip6tables)
+        for set_name in ipset6_names:
+            for chain, direction in [( "INPUT", "src" ), ( "FORWARD", "src" ), ( "OUTPUT", "dst" )]:
+                rule_args = [chain, "-m", "set", "--match-set", set_name, direction] + options
+                if self.iptablesRuleExists( rule_args, ipv6=True ):
+                    logger.info( f"ip6tables rule already exists, skipping: {' '.join( rule_args )}" )
+                    rules_skipped += 1
+                else:
+                    if self.addIptablesRule( rule_args, ipv6=True ):
+                        rules_added += 1
+                        print( f"  Added ip6tables rule: -I {' '.join( rule_args )}" )
+
+        print( f"\n{rules_added} iptables/ip6tables rules added, {rules_skipped} already existed (skipped)." )
+        logger.info( f"{rules_added} iptables/ip6tables rules added, {rules_skipped} already existed (skipped)." )
+
+    # Remove iptables/ip6tables rules for all created ipsets (cleanup/teardown).
+
+    def removeIptablesRules( self, iptables_options="-j DROP" ):
+        options = iptables_options.split( )
+        ipset4_names, ipset6_names = self.nameFormat( self.permanent_ipset_basename_v4 )
+
+        rules_removed = 0
+
+        for set_name in ipset4_names:
+            for chain, direction in [( "INPUT", "src" ), ( "FORWARD", "src" ), ( "OUTPUT", "dst" )]:
+                rule_args = [chain, "-m", "set", "--match-set", set_name, direction] + options
+                if self.iptablesRuleExists( rule_args, ipv6=False ):
+                    if self.removeIptablesRule( rule_args, ipv6=False ):
+                        rules_removed += 1
+
+        for set_name in ipset6_names:
+            for chain, direction in [( "INPUT", "src" ), ( "FORWARD", "src" ), ( "OUTPUT", "dst" )]:
+                rule_args = [chain, "-m", "set", "--match-set", set_name, direction] + options
+                if self.iptablesRuleExists( rule_args, ipv6=True ):
+                    if self.removeIptablesRule( rule_args, ipv6=True ):
+                        rules_removed += 1
+
+        print( f"{rules_removed} iptables/ip6tables rules removed." )
+        logger.info( f"{rules_removed} iptables/ip6tables rules removed." )
+
     # Download blocklists - not yet impllemented -coming soon
     #    def get_list( self ):
     #96332e
@@ -710,6 +926,11 @@ def main( ):
                             help="A file containing allowed domains that shall not be blocked, one per line." )
         parser.add_argument('-ai', '--allowed_ips', default='',
                             help="a list containing ips or subnets that shall not be blocked, one per line. These include private networks by default.")
+        parser.add_argument( '-u', '--urls', default='',
+                             help="comma-separated list of URLs to download blocklists from" )
+        parser.add_argument( '-dl', '--default_lists', default='0',
+                             help="include a curated suite of well-known public blocklists "
+                                  "(1, Y, or y to enable). See source for the full list of URLs." )
         args = parser.parse_args( )
 
         # When in interactive mode, gather essential inputs and determine if the user would like ipsets created, config files written, etc.
@@ -720,6 +941,12 @@ def main( ):
             args.output_ip_list_v4 = input( "Please enter the name of the output IPv4 block file: " )
             args.output_ip_list_v6 = input( "Please enter the name of the output IPv6 block file: " )
             args.ipset = input( "Do you want to create the ipset file int /etc/ipsets? (Y/N)" )
+            args.urls = input( "Enter comma-separated URLs of blocklists to download "
+                               "(or press Enter to skip): " )
+            use_defaults = input( "Include the default curated suite of well-known "
+                                  "public blocklists? (Y/N) " )
+            if use_defaults in ( 'Y', 'y', '1' ):
+                args.default_lists = '1'
 
             # Gain root privileges if we are doing operations that require it.
 
@@ -747,8 +974,8 @@ def main( ):
 
         # If minimal arguments are not supplied and the script is not in interactive mode, explain what is missing and exit.
 
-        if args.files == '':
-            raise SystemExit( '\n\nRequired input files or directories not given. Exiting.' )
+        if args.files == '' and args.urls == '' and args.default_lists not in ( '1', 'Y', 'y' ):
+            raise SystemExit( '\n\nRequired input files, directories, or URLs not given. Exiting.' )
         if args.output_ip_list_v6 == '' and args.ipv6 in ( '1', 'Y', 'y' ):
             raise SystemExit( "Output IPv6 list filename not given. Exiting." )
         else:
@@ -770,10 +997,36 @@ def main( ):
         userInput = args.files.split( "," )
         items = []
         for thing in userInput:
-            for item in Path( thing ).rglob( '*' ):
-                if item.is_file( ):
-                    items.append( item )
-                    logger.info( f"Adding {item} to the list of files to parse." )
+            thing = thing.strip( )
+            if thing:
+                for item in Path( thing ).rglob( '*' ):
+                    if item.is_file( ):
+                        items.append( item )
+                        logger.info( f"Adding {item} to the list of files to parse." )
+
+        # Build list of URLs to download and add the resulting temp files to items.
+
+        download_urls = []
+
+        if args.default_lists in ( '1', 'Y', 'y' ):
+            download_urls.extend( DEFAULT_BLOCKLISTS )
+            logger.info( f"Default blocklists enabled: {len( DEFAULT_BLOCKLISTS )} URLs queued." )
+
+        if args.urls != '':
+            user_urls = args.urls.split( "," )
+            for idx, url in enumerate( user_urls ):
+                url = url.strip( )
+                if url:
+                    download_urls.append( ( f"user-list-{idx + 1}", url ) )
+            logger.info( f"User-provided URLs: {len( user_urls )} URLs queued." )
+
+        downloaded_temp_files = []
+        if download_urls:
+            downloaded_temp_files = download_blocklists( download_urls )
+            items.extend( downloaded_temp_files )
+            logger.info( f"Added {len( downloaded_temp_files )} downloaded files "
+                         f"to processing queue. Total items: {len( items )}" )
+
         count = 0
         createInputObjects( items )
         lists = DomainIpLists( inputfileobjects, domainBlocks_file = args.output_domain_list, ipBlocks_v4_file = args.output_ip_list_v4, ipBlocks_v6_file = args.output_ip_list_v6 )
@@ -862,6 +1115,31 @@ def main( ):
             ipsets.processIpsets( )
             time.sleep( 2 )
             print( "\n\n\nProcessing Ipsets completed." )
+
+        # If the user selected to add iptables rules, add them for the created ipsets.
+        # Requires ipsets to have been created first (-is must also be enabled).
+
+        if args.iptables_rules in ( 'Y', 'y', '1' ):
+            if args.ipset not in ( 'Y', 'y', '1' ):
+                print( "\n\nWarning: iptables rules require ipsets to be created first. "
+                       "Skipping iptables rules because -is was not enabled." )
+                logger.warning( "Skipping iptables rules: ipsets were not created (-is not set)." )
+            else:
+                logger.info( "Adding iptables rules for created ipsets..." )
+                print( "\n\nNow adding iptables/ip6tables rules for the created ipsets...\n" )
+                ipsets.addIptablesRules( iptables_options=args.iptables_options )
+                time.sleep( 2 )
+                print( "\n\nIptables rule processing completed." )
+
+        # Clean up any temporary downloaded files.
+
+        for tmp_path in downloaded_temp_files:
+            try:
+                os.unlink( tmp_path )
+                logger.info( f"Cleaned up temporary file: {tmp_path}" )
+            except OSError as e:
+                logger.warning( f"Failed to clean up temp file {tmp_path}: {e}" )
+
         # Le fin.
 
         print( '\n\nProcessing complete.' )
