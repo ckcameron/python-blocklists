@@ -105,7 +105,14 @@ def eprint(*args, **kwargs):
 
 def download_blocklists( urls ):
     downloaded_files = []
-
+    global external_lists
+    external_lists = Path( external_lists )
+    if  external_lists != 0 and external_lists.is_file( ):
+        with open( Path( args.external_lists ), "a+" ) as l:
+            externallists = l.read
+            externallistslines =  externallists.split( )
+            for i in externallistslines:
+                urls[i.split( )[0]] = i.split( )[1]
     print( f"\n\nDownloading {len( urls )} blocklist(s) from the internet...\n" )
     logger.info( f"Beginning download of {len( urls )} blocklist URL(s)." )
 
@@ -116,7 +123,7 @@ def download_blocklists( urls ):
             try:
                 req = urllib.request.Request( url, headers = {
                     'User-Agent': 'blocklists/1.0 (https://github.com/ckcameron/python-blocklists)'
-                })
+                } )
                 response = urllib.request.urlopen( req, timeout = 30 )
                 content = response.read( )
 
@@ -172,6 +179,7 @@ def download_blocklists( urls ):
 
     return downloaded_files
 
+
 # Class for inputfiles and associated data
 
 class InputFile( ):
@@ -195,7 +203,7 @@ class InputFile( ):
         self.domains_string = f"##{self.filename}\n"
         self.ips_v4_string = f"##{self.filename}\n"
         self.ips_v6_string = f"##{self.filename}\n"
-        time.sleep(.25)
+        time.sleep( .25 )
         #print( f"{self.file} added to the list for processing." )
 
 
@@ -296,11 +304,11 @@ class DomainIpLists:
             if address != " 0.0.0.0 ":
                 file.ip4count += 1
                 file.ips_v4.append( address )
-                logger.info( f"IP4: Added ipsv4 to the file ip lists." )
+                logger.info( f"IPv4: Added IPv4 address(es) to the file-local ip lists." )
         for address in combinedv6:
             file.ip6count += 1
             file.ips_v6.append( address )
-            logger.info( f"\nIP6: Added ipsv6 to the file ip lists." )
+            logger.info( f"\nIPv6: Added IPv6 address(es) to the file-local ip lists." )
         for ip in file.ips_v4:
             file.ips_v4_string += f'{ ip }\n'
         for ip in file.ips_v6:
@@ -359,7 +367,7 @@ class DomainIpLists:
                     res5 = match_v6.findall(spliturl)
                     res6 = match_v6_cidr.findall(spliturl)
                     if res4 or res5 or res6:
-                        print( f"Found IP dress {res4}{res5}{res6}, skipping")
+                        print( f"Found IP address {res4}{res5}{res6}, skipping.")
                         pass
                     elif spliturl == "http:":
                         pass
@@ -698,49 +706,6 @@ class IpsetBlocklist:
         print( f"{rules_removed} iptables/ip6tables rules removed." )
         logger.info( f"{rules_removed} iptables/ip6tables rules removed." )
 
-    # Download blocklists - not yet impllemented -coming soon
-    #    def get_list( self ):
-    #96332e
-    #    ctx = ssl.create_default_context( )
-    #    ctx.options |= ssl.OP_NO_TLSv1
-    #    ctx.options |= ssl.OP_NO_TLSv1_1
-    #    ctx.options |= ssl.OP_NO_COMPRESSION
-
-    #    # https connection for download
-
-    #    connection = http.client.HTTPSConnection(
-    #        self.blocklists_fqdn,
-    #        context=ctx, timeout=5 )
-    #    try:
-    #        connection.connect( )
-    #    except:
-    #        eprint( "Connection error." )
-    #
-    #    try:
-    #        connection.request( "GET", self.blocklists_file_v4 )
-    #    except socket.error as e:
-    #        eprint( "Socket error: {}".format( e ) )
-    #        return False
-    #    except socket.timeout as timeout:
-    #        eprint( "Socket error: Connection timed out." )
-    #        return False
-
-    #   response = connection.getresponse( )
-
-    #    if response.status != 200:
-    #        eprint( "Server responded with statuscode {}. Aborting".format( response.statuscode ) )
-    #        return False
-
-    #    body = response.read( )
-    #    if not body:
-    #        eprint( "Server didn't send us any data." )
-    #        return False
-
-    #    self.blocklist_list = body.decode( ).split( "\n" )
-    #   return True
-
-    # Filter ipblocklists for bogon and private addresses and process the ipset files
-
     def processIpsets( self ):
 
         # set up IPv4 and IPv6 temporary files
@@ -862,6 +827,7 @@ domaincount = 0
 ipv4_count = 0
 total_ipcount = 0
 ipv6_count = 0
+external_lists = 0
 
 
 # Global functions
@@ -931,6 +897,8 @@ def main( ):
         parser.add_argument( '-dl', '--default_lists', default='0',
                              help="include a curated suite of well-known public blocklists "
                                   "(1, Y, or y to enable). See source for the full list of URLs." )
+        parser.add_argument( '-el', '--external_lists', default = '0',
+                             help = "a file containing blocklists to be downloaded, one per line in {name} {url} format (default: none)" )
         args = parser.parse_args( )
 
         # When in interactive mode, gather essential inputs and determine if the user would like ipsets created, config files written, etc.
@@ -970,6 +938,9 @@ def main( ):
         args.ipBlocks_v4_file = args.output_ip_list_v4
         args.ipBlocks_v6_file = args.output_ip_list_v6
         args.domainBlocks_file = args.output_domain_list
+        global external_lists
+        if args.external_lists != 0:
+            external_lists = args.external_lists
 
 
         # If minimal arguments are not supplied and the script is not in interactive mode, explain what is missing and exit.
@@ -996,6 +967,9 @@ def main( ):
 
         userInput = args.files.split( "," )
         items = []
+        items.append( args.output_domain_list )
+        items.append( args.output_ip_list_v4 )
+        items.append( args.output_ip_list_v6 )
         for thing in userInput:
             thing = thing.strip( )
             if thing:
