@@ -87,8 +87,8 @@ def install(source, networks, interfaces):
     if previous and previous.get('netns') != os.readlink('/proc/self/ns/net'):
         raise ValueError('Existing installation belongs to a different network namespace')
     # bpffs must already be mounted; do not silently pin into an ordinary fs.
-    mounted = run('stat', '-f', '-c', '%T', '/sys/fs/bpf', capture_output=True).stdout.strip()
-    if mounted != 'bpf_fs':
+    mounted = run('stat', '-f', '-c', '%t', '/sys/fs/bpf', capture_output=True).stdout.strip()
+    if int(mounted, 16) != 0xCAFE4A11:  # BPF_FS_MAGIC, linux/magic.h
         raise ValueError('Mount bpffs first: mount -t bpf bpf /sys/fs/bpf')
     ROOT.mkdir(exist_ok=True)
     generation = ROOT / ('g' + uuid.uuid4().hex[:12])
