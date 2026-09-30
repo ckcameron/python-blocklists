@@ -300,7 +300,8 @@ def firewall_script(nets, args, remove=False):
             values = [n for n in nets if n.version == version]
             capacity = max(1024, len(values) * 2)
             hashsize = max(1024, 1 << max(0, (max(1, len(values) // 2) - 1).bit_length()))
-            out += [f'ipset create {name} hash:net family {family} -exist',
+            out += [f'if ! ipset list {name} >/dev/null 2>&1; then',
+                    f'  ipset create {name} hash:net family {family}', 'fi',
                     f'ipset destroy {name}_next 2>/dev/null || true',
                     "ipset restore <<'BLOCKLISTS_IPSET'",
                     f'create {name}_next hash:net family {family} hashsize {hashsize} maxelem {capacity}']

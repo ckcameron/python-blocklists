@@ -54,6 +54,9 @@ def attach(pin, interfaces, previous):
     for name in selected:
         for direction in ('ingress', 'egress'):
             for filt in query('tc', '-j', 'filter', 'show', 'dev', name, direction):
+                # tc also emits a summary record for each filter priority.
+                if 'options' not in filt:
+                    continue
                 if int(filt.get('pref', 65535)) <= int(PREF):
                     options = filt.get('options', {})
                     if (filt.get('kind') != 'bpf' or options.get('id') not in old_ids | new_ids
