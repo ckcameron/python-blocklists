@@ -236,13 +236,17 @@ def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None
                     else:
                         for value in values:
                             nets.update(subtract(networks(value), allowed_nets))
+    pending_domains = sorted(n for n in names if any((n, typ) not in seen for typ in ('A', 'AAAA')))
     report.update(dns_queries=query_count, dns_failures=failures,
+                  dns_unqueried_domains=pending_domains,
                   ptr_skipped_networks=sorted(skipped), dns_round_limit=args.dns_rounds,
                   associations=associations)
     if skipped:
         LOG.warning('PTR enumeration skipped for %d large networks; see report.json', len(skipped))
     if report.get('dns_budget_exhausted'):
         LOG.warning('DNS query budget reached; see report.json')
+    if pending_domains:
+        LOG.warning('%d discovered domains await forward lookup; increase DNS limits (see report.json)', len(pending_domains))
     return nets, names
 
 
@@ -341,11 +345,14 @@ def write_bundle(directory, compact, optimized, names, args, report):
     ebpf_source = (ebpf_dir / 'blocklists.bpf.c').read_text()
     ebpf_loader = (ebpf_dir / 'loader.py').read_text()
     payloads['apply-ebpf.py'] = ('#!/usr/bin/env python3\n' + ebpf_loader + '\n'
-        + f'if __name__ == "__main__":\n    main({ebpf_source!r}, {[str(n) for n in compact]!r})\n')
+        + f'SOURCE = {ebpf_source!r}\nNETWORKS = {[str(n) for n in compact]!r}\n'
+        + 'if __name__ == "__main__":\n    main(SOURCE, NETWORKS)\n')
     payloads['blocklists.bpf.c'] = ebpf_source
     for kind, filename in [('wrappers', 'hosts.deny.blocklists'), ('unbound', 'unbound-blocklists.conf'),
                            ('dnscrypt', 'dnscrypt-blocked-names.txt')]:
-        payloads[f'apply-{kind}.py'] = '#!/usr/bin/env python3\n' + installer + '\n' + f'if __name__ == "__main__":\n    main({kind!r}, {payloads[filename]!r})\n'
+        payloads[f'apply-{kind}.py'] = ('#!/usr/bin/env python3\n' + installer + '\n'
+            + f'PAYLOAD = {payloads[filename]!r}\n'
+            + f'if __name__ == "__main__":\n    main({kind!r}, PAYLOAD)\n')
     for name, text in payloads.items():
         target = directory / name
         target.write_text(text, encoding='utf-8')

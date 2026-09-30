@@ -6,7 +6,7 @@ work=$(mktemp -d)
 ns="blocklists-test-$$"
 peer="bl-peer-$$"
 cleanup() {
-    ip netns exec "$ns" python3 "$work/out/apply-ebpf.py" remove 2>/dev/null || true
+    nsenter --net="/run/netns/$ns" python3 "$work/out/apply-ebpf.py" remove 2>/dev/null || true
     ip netns del "$ns" 2>/dev/null || true
     ip link del "$peer" 2>/dev/null || true
     rm -rf "$work"
@@ -37,7 +37,7 @@ ip netns exec "$ns" sh "$work/out/remove-firewall.sh"
 ip netns exec "$ns" ping -c 1 -W 2 198.18.0.1
 # No iptables blocks remain: eBPF alone must enforce both address families.
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
-ip netns exec "$ns" python3 "$work/out/apply-ebpf.py" install
+nsenter --net="/run/netns/$ns" python3 "$work/out/apply-ebpf.py" install
 if ip netns exec "$ns" ping -c 1 -W 1 198.18.0.1; then exit 1; fi
 if ip netns exec "$ns" ping -6 -c 1 -W 1 2001:db8:123::1; then exit 1; fi
 if ping -c 1 -W 1 198.18.0.2; then exit 1; fi
@@ -45,7 +45,7 @@ if ping -6 -c 1 -W 1 2001:db8:123::2; then exit 1; fi
 # An unlisted address still works, and updates do not duplicate TC filters.
 ip addr add 198.18.0.3/24 dev "$peer"
 ip netns exec "$ns" ping -c 1 -W 2 198.18.0.3
-ip netns exec "$ns" python3 "$work/out/apply-ebpf.py" monitor > "$work/monitor.jsonl"
+nsenter --net="/run/netns/$ns" python3 "$work/out/apply-ebpf.py" monitor > "$work/monitor.jsonl"
 python3 - "$work/monitor.jsonl" <<'PY'
 import json, sys
 rows = [json.loads(s) for s in open(sys.argv[1])]
@@ -53,8 +53,8 @@ assert {'ingress', 'egress'} <= {r.get('direction') for r in rows}, rows
 assert {'198.18.0.1', '2001:db8:123::1'} <= {r.get('ip') for r in rows}, rows
 assert all(r['packets'] > 0 for r in rows if 'packets' in r), rows
 PY
-ip netns exec "$ns" python3 "$work/out/apply-ebpf.py" install
+nsenter --net="/run/netns/$ns" python3 "$work/out/apply-ebpf.py" install
 if ip netns exec "$ns" ping -c 1 -W 1 198.18.0.1; then exit 1; fi
-ip netns exec "$ns" python3 "$work/out/apply-ebpf.py" remove
+nsenter --net="/run/netns/$ns" python3 "$work/out/apply-ebpf.py" remove
 ip netns exec "$ns" ping -c 1 -W 2 198.18.0.1
 ip netns exec "$ns" ping -6 -c 1 -W 2 2001:db8:123::1
