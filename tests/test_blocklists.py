@@ -188,6 +188,11 @@ class Installers(unittest.TestCase):
 
 
 class EBPF(unittest.TestCase):
+    def test_tc_nested_program_metadata(self):
+        self.assertEqual(loader.filter_program_id({'options': {'prog': {'id': 42}}}), 42)
+        self.assertEqual(loader.filter_program_id({'options': {'id': 43}}), 43)
+        self.assertIsNone(loader.filter_program_id({'kind': 'bpf', 'pref': 1}))
+
     def test_lpm_endianness(self):
         import struct
         self.assertEqual(loader.prefix_key('198.51.100.0/24'), struct.pack('=I', 24) + bytes([198,51,100,0]))

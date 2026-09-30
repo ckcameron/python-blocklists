@@ -33,6 +33,11 @@ def program_id(path):
     return (value[0] if isinstance(value, list) else value)['id']
 
 
+def filter_program_id(filt):
+    options = filt.get('options', {})
+    return options.get('prog', {}).get('id', options.get('id'))
+
+
 def prefix_key(network):
     n = ipaddress.ip_network(network)
     return struct.pack('=I', n.prefixlen) + n.network_address.packed
@@ -59,7 +64,7 @@ def attach(pin, interfaces, previous):
                     continue
                 if int(filt.get('pref', 65535)) <= int(PREF):
                     options = filt.get('options', {})
-                    if (filt.get('kind') != 'bpf' or options.get('id') not in old_ids | new_ids
+                    if (filt.get('kind') != 'bpf' or filter_program_id(filt) not in old_ids | new_ids
                             or str(options.get('handle')) not in (HANDLE, str(int(HANDLE, 16)))):
                         raise ValueError(f'{name}/{direction}: conflicting TC filter at priority {filt.get("pref")}')
     installed = dict(previous.get('interfaces', {}))
@@ -194,7 +199,7 @@ def main(source, networks):
                         continue
                     for direction in ('ingress', 'egress'):
                         filters = query('tc', '-j', 'filter', 'show', 'dev', name, direction)
-                        if any(f.get('options', {}).get('id') in state['program_ids'] for f in filters):
+                        if any(filter_program_id(f) in state['program_ids'] for f in filters):
                             run('tc', 'filter', 'del', 'dev', name, direction, 'pref', PREF, 'handle', HANDLE, 'protocol', 'all', 'bpf')
                 shutil.rmtree(ROOT)
                 STATE.unlink()
