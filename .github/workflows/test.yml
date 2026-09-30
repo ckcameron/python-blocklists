@@ -1,0 +1,27 @@
+name: Test blocklists
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+  linux-enforcement:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux enforcement tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libbpf-dev iprange ipset iptables unbound iproute2 iputils-ping linux-tools-common linux-tools-generic
+          tool=$(find /usr/lib -name bpftool -type f -print -quit)
+          test -n "$tool"
+          sudo ln -sf "$tool" /usr/local/bin/bpftool
+      - name: Test generated installers and eBPF packet enforcement
+        run: sudo env PATH="$PATH:/usr/local/bin" bash tests/integration-linux.sh
