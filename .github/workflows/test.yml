@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libbpf-dev iprange ipset iptables unbound iproute2 iputils-ping linux-tools-common linux-tools-generic
-          tool=$(find /usr/lib/linux-tools -name bpftool -type f | head -1)
+          tool=$(find /usr/lib -name bpftool -type f -print -quit)
           test -n "$tool"
           sudo ln -sf "$tool" /usr/local/bin/bpftool
       - name: Test generated installers and eBPF packet enforcement
