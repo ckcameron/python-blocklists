@@ -115,7 +115,7 @@ def install(source, networks, interfaces):
                     value = ' '.join(f'{b:02x}' for b in struct.pack('=I', 1))
                     stream.write(f'map update pinned {generation}/maps/blocked{n.version} key hex {key} value hex {value}\n')
             if networks:
-                run('bpftool', '-b', batch)
+                run('bpftool', 'batch', 'file', batch)
         # Record generation before attaching, so a failed partial attach remains
         # recoverable. Keep old pins until all interfaces are successfully replaced.
         ids = [program_id(generation / 'progs' / f'bl_{d}')
