@@ -1,7 +1,7 @@
 """Parse feeds, enrich through DNS, and generate deployable blocking bundles."""
 # Copyright 2025-2026 CK Cameron. SPDX-License-Identifier: GPL-3.0-only
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import ipaddress as ip
 import json
 import logging
@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from default_sources import DEFAULT_BLOCKLISTS
+from blocklists_progress import Progress
 
 LOG = logging.getLogger('blocklists')
 LOCAL_NETS = '''0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8
@@ -56,7 +57,7 @@ def networks(value):
     return []
 
 
-def parse_text(text):
+def parse_text(text, on_progress=None):
     """Recognize list records, never scrape domains out of comments or prose.
 
     Supports IP/CIDR/range, hosts, URLs, CSV/TSV tokens, JSON values,
@@ -82,7 +83,10 @@ def parse_text(text):
                     for child in v.values():
                         yield from strings(child)
             text = '\n'.join(strings(obj))
-    for raw in text.splitlines():
+    rows = text.splitlines()
+    for line_number, raw in enumerate(rows, 1):
+        if on_progress and (line_number == 1 or line_number % 1024 == 0 or line_number == len(rows)):
+            on_progress(line_number, len(rows))
         line = raw.strip().lstrip('\ufeff')
         if not line or line.startswith(('#', '!', ';', '[', '@@')):
             continue
@@ -194,8 +198,9 @@ class Resolver:
             return task, [], type(exc).__name__
 
 
-def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None):
+def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None, progress=None):
     """Bounded rounds of forward/reverse expansion, with no silent range sampling."""
+    progress = progress or Progress("off")
     resolver = resolver or Resolver(args.dns_timeout, args.resolver)
     seen = set()
     skipped = set()
@@ -204,6 +209,7 @@ def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None
     failures = {}
     associations = []
     for round_number in range(args.dns_rounds):
+        progress.start(f"[4/7] DNS round {round_number + 1}: planning", detail="Collecting new forward and reverse queries")
         tasks = [(n, typ) for n in sorted(names) for typ in ('A', 'AAAA') if (n, typ) not in seen]
         for n in sorted(nets, key=lambda x: (x.version, int(x.network_address), x.prefixlen)):
             if n.num_addresses > args.ptr_max_addresses:
@@ -220,13 +226,18 @@ def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None
             tasks = tasks[:remaining]
         if not tasks:
             break
-        LOG.info('DNS round %d: %d queries', round_number + 1, len(tasks))
+        progress.start(f'[4/7] DNS round {round_number + 1}/{args.dns_rounds}', len(tasks), 'Starting DNS queries')
         seen.update(tasks)
         query_count += len(tasks)
         # map in small batches bounds queued futures on large lists.
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             for offset in range(0, len(tasks), args.workers * 4):
-                for (name, typ), values, error in pool.map(resolver.query, tasks[offset:offset + args.workers * 4]):
+                batch = tasks[offset:offset + args.workers * 4]
+                progress.update(detail=f'Querying {batch[0][1]} {batch[0][0]}; {len(batch)} queued in batch')
+                futures = [pool.submit(resolver.query, task) for task in batch]
+                for future in as_completed(futures):
+                    (name, typ), values, error = future.result()
+                    progress.update(detail=f'{typ} {name}: {error or str(len(values)) + " answer(s)"}', advance=1)
                     if error:
                         failures[error] = failures.get(error, 0) + 1
                     if values:
@@ -250,14 +261,17 @@ def enrich(nets, names, allowed_nets, allowed_names, args, report, resolver=None
     return nets, names
 
 
-def optimize(nets, args, report):
+def optimize(nets, args, report, progress=None):
     """Reduce hash:net prefix diversity, verifying exact address-set equality."""
+    progress = progress or Progress("off")
+    progress.start("[6/7] Optimize IP sets", 2, "Collapsing exact address coverage")
     original = collapse(nets)
     result = []
     executable = shutil.which(args.iprange)
     if args.optimizer == 'iprange' and not executable:
         raise ValueError('iprange is required; install it or explicitly use --optimizer python')
     for version in (4, 6):
+        progress.update(detail=f"IPv{version}: {args.optimizer} optimization and coverage verification")
         family = [n for n in original if n.version == version]
         reduced = family
         if family and args.optimizer == 'iprange':
@@ -278,6 +292,7 @@ def optimize(nets, args, report):
         # hash:net cannot store /0; two /1s cover the identical address set.
         reduced = [part for n in reduced for part in (n.subnets(prefixlen_diff=1) if n.prefixlen == 0 else [n])]
         result.extend(reduced)
+        progress.update(detail=f'IPv{version}: {len(family):,} compact CIDRs -> {len(reduced):,} ipset entries', advance=1)
         report[f'ipv{version}_optimization'] = {
             'minimal_cidrs': len(family), 'ipset_entries': len(reduced),
             'prefix_lengths': len({n.prefixlen for n in reduced}),
@@ -326,7 +341,9 @@ def firewall_script(nets, args, remove=False):
     return '\n'.join(out) + '\n'
 
 
-def write_bundle(directory, compact, optimized, names, args, report):
+def write_bundle(directory, compact, optimized, names, args, report, progress=None):
+    progress = progress or Progress("off")
+    progress.start("[7/7] Build output bundle", detail="Rendering blocklists and self-contained installers")
     directory.mkdir(parents=True, exist_ok=True)
     payloads = {
         'ips-v4.txt': lines(n for n in compact if n.version == 4),
@@ -353,10 +370,13 @@ def write_bundle(directory, compact, optimized, names, args, report):
         payloads[f'apply-{kind}.py'] = ('#!/usr/bin/env python3\n' + installer + '\n'
             + f'PAYLOAD = {payloads[filename]!r}\n'
             + f'if __name__ == "__main__":\n    main({kind!r}, PAYLOAD)\n')
+    progress.start("[7/7] Write output bundle", len(payloads), "Writing staged files")
     for name, text in payloads.items():
+        progress.update(detail=name)
         target = directory / name
         target.write_text(text, encoding='utf-8')
         target.chmod(0o755 if name.endswith(('.sh', '.py')) else 0o644)
+        progress.update(advance=1)
 
 
 def positive(value):
@@ -372,8 +392,22 @@ def enabled(value):
     return str(value).lower() in ('1', 'y', 'yes', 'true')
 
 
+def read_source(stream, limit, source, progress):
+    chunks, size = [], 0
+    while size <= limit:
+        chunk = stream.read(min(65536, limit + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        progress.update(detail=f'Reading {source}: {size:,} bytes received')
+    return b''.join(chunks)
+
+
 def cli():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--progress', choices=('auto', 'plain', 'off'), default='auto',
+                   help='stderr progress: auto animates terminals; plain logs stages; off disables progress')
     p.add_argument('inputs', nargs='*', help='local files/directories or HTTP(S) feed URLs')
     p.add_argument('-f', '--files', default='', help='legacy comma-separated local paths')
     p.add_argument('-u', '--urls', default='', help='legacy comma-separated feed URLs')
@@ -412,93 +446,125 @@ def main(argv=None):
     p = cli()
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    try:
-        if args.dns_timeout <= 0 or args.reduce_percent < 0:
-            raise ValueError('DNS timeout must be positive and reduce-percent nonnegative')
-        for name in (args.ipset4_name, args.ipset6_name):
-            if not re.fullmatch('[A-Za-z][A-Za-z0-9_-]{0,24}', name):
-                raise ValueError('ipset names must start with a letter and contain 1–25 letters/digits/_/-')
-        if args.ipset4_name == args.ipset6_name:
-            raise ValueError('IPv4 and IPv6 ipset names must differ')
-        if args.interactive:
-            args.files = input('Input paths (comma separated): ').strip() or args.files
-        sources = args.inputs + [s.strip() for s in (args.files + ',' + args.urls).split(',') if s.strip()]
-        if args.default_lists:
-            sources += [url for _, url in DEFAULT_BLOCKLISTS]
-        if args.external_lists:
-            for line in Path(args.external_lists).read_text().splitlines():
-                line = line.split('#', 1)[0].strip()
-                if line:
-                    sources.append(line.split()[-1])
-        if not sources:
-            p.error('provide input paths, URLs, --external_lists, or --default_lists')
-        expanded = []
-        for source in sources:
-            if not source.startswith(('https://', 'http://')) and Path(source).is_dir():
-                expanded += [str(f) for f in sorted(Path(source).rglob('*')) if f.is_file()
-                             and not f.resolve().is_relative_to(args.output_dir.resolve())]
-            else:
-                expanded.append(source)
-        allowed_nets = [ip.ip_network(n) for n in LOCAL_NETS] if not args.include_local else []
-        allowed_names = set()
-        if args.allowed_ips:
-            allowed_nets += list(parse_text(args.allowed_ips.read_text())[0])
-        if args.allowed_domains:
-            allowed_names = parse_text(args.allowed_domains.read_text())[1]
-        nets, names = set(), set()
-        report = {'sources': [], 'failed_sources': [], 'optimizer': args.optimizer}
-        for source in dict.fromkeys(expanded):
-            try:
-                if source.startswith(('https://', 'http://')):
-                    with urlopen(Request(source, headers={'User-Agent': 'python-blocklists/2'}), timeout=30) as response:
-                        data = response.read(args.max_source_bytes + 1)
+    with Progress(args.progress) as progress, progress.logging(LOG):
+        try:
+            if args.dns_timeout <= 0 or args.reduce_percent < 0:
+                raise ValueError('DNS timeout must be positive and reduce-percent nonnegative')
+            for name in (args.ipset4_name, args.ipset6_name):
+                if not re.fullmatch('[A-Za-z][A-Za-z0-9_-]{0,24}', name):
+                    raise ValueError('ipset names must start with a letter and contain 1–25 letters/digits/_/-')
+            if args.ipset4_name == args.ipset6_name:
+                raise ValueError('IPv4 and IPv6 ipset names must differ')
+            if args.interactive:
+                args.files = input('Input paths (comma separated): ').strip() or args.files
+            progress.start('[1/7] Discover inputs', detail='Reading source configuration')
+            sources = args.inputs + [s.strip() for s in (args.files + ',' + args.urls).split(',') if s.strip()]
+            if args.default_lists:
+                sources += [url for _, url in DEFAULT_BLOCKLISTS]
+            if args.external_lists:
+                for line in Path(args.external_lists).read_text().splitlines():
+                    line = line.split('#', 1)[0].strip()
+                    if line:
+                        sources.append(line.split()[-1])
+            if not sources:
+                p.error('provide input paths, URLs, --external_lists, or --default_lists')
+            expanded = []
+            progress.start("[1/7] Discover input files", len(sources))
+            for source in sources:
+                progress.update(detail=source)
+                if not source.startswith(('https://', 'http://')) and Path(source).is_dir():
+                    expanded += [str(f) for f in sorted(Path(source).rglob('*')) if f.is_file()
+                                 and not f.resolve().is_relative_to(args.output_dir.resolve())]
                 else:
-                    with open(source, 'rb') as stream:
-                        data = stream.read(args.max_source_bytes + 1)
-                if len(data) > args.max_source_bytes:
-                    raise ValueError('source exceeds --max-source-bytes')
-                if not data.strip():
-                    raise ValueError('empty source')
-                ns, ds, ignored = parse_text(data.decode('utf-8-sig'))
-                if not ns and not ds:
-                    raise ValueError('source contains no recognized block records')
-                nets.update(ns)
-                names.update(ds)
-                report['sources'].append({'source': source, 'networks': len(ns), 'domains': len(ds), 'ignored_lines': ignored})
-            except (OSError, ValueError) as exc:
-                if not args.allow_partial:
-                    raise ValueError(f'{source}: {exc}') from exc
-                report['failed_sources'].append({'source': source, 'error': str(exc)})
-                LOG.warning('%s: %s', source, exc)
-        # Filter individually here so explicit hosts still get PTR queries even
-        # when also contained in a large source CIDR.
-        nets = {part for n in nets for part in subtract([n], allowed_nets)}
-        names = {n for n in names if not domain_allowed(n, allowed_names)}
-        if not args.ipv6:
-            nets = {n for n in nets if n.version == 4}
-        if not args.no_dns:
-            nets, names = enrich(nets, names, allowed_nets, allowed_names, args, report)
-        if not args.ipv6:
-            nets = {n for n in nets if n.version == 4}
-        nets = subtract(nets, allowed_nets)
-        if not nets and not names and not args.allow_empty:
-            raise ValueError('empty result; use --allow-empty only if intentional')
-        compact, optimized = optimize(nets, args, report)
-        report['domain_count'] = len(names)
-        report['dns_enabled'] = not args.no_dns
-        # Generate everything successfully in staging before replacing any output.
-        args.output_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=args.output_dir.parent) as staging:
-            write_bundle(Path(staging), compact, optimized, names, args, report)
-            args.output_dir.mkdir(parents=True, exist_ok=True)
-            for f in Path(staging).iterdir():
-                f.replace(args.output_dir / f.name)
-        for dest, name in [(args.output_ip_list_v4, 'ips-v4.txt'), (args.output_ip_list_v6, 'ips-v6.txt'), (args.output_domain_list, 'domains.txt')]:
-            if dest and dest.resolve() != (args.output_dir / name).resolve():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(args.output_dir / name, dest)
-        LOG.info('Generated %s: %d domain names, %d ipset entries. Nothing installed.', args.output_dir, len(names), len(optimized))
-        return 0
-    except (OSError, ValueError, ImportError, subprocess.SubprocessError) as exc:
-        LOG.error('%s', exc)
-        return 1
+                    expanded.append(source)
+                progress.update(advance=1)
+            progress.start("[2/7] Load exclusions", detail="Built-in networks and optional allowlist files")
+            allowed_nets = [ip.ip_network(n) for n in LOCAL_NETS] if not args.include_local else []
+            allowed_names = set()
+            if args.allowed_ips:
+                allowed_nets += list(parse_text(args.allowed_ips.read_text())[0])
+            if args.allowed_domains:
+                allowed_names = parse_text(args.allowed_domains.read_text())[1]
+            nets, names = set(), set()
+            report = {'sources': [], 'failed_sources': [], 'optimizer': args.optimizer}
+            unique_sources = list(dict.fromkeys(expanded))
+            progress.start("[2/7] Read and parse feeds", len(unique_sources))
+            for source in unique_sources:
+                progress.update(detail=f"Reading {source}")
+                try:
+                    if source.startswith(('https://', 'http://')):
+                        with urlopen(Request(source, headers={'User-Agent': 'python-blocklists/2'}), timeout=30) as response:
+                            data = read_source(response, args.max_source_bytes, source, progress)
+                    else:
+                        with open(source, 'rb') as stream:
+                            data = read_source(stream, args.max_source_bytes, source, progress)
+                    if len(data) > args.max_source_bytes:
+                        raise ValueError('source exceeds --max-source-bytes')
+                    if not data.strip():
+                        raise ValueError('empty source')
+                    progress.update(detail=f'Parsing {source}: {len(data):,} bytes')
+                    ns, ds, ignored = parse_text(data.decode('utf-8-sig'),
+                        on_progress=lambda done, total: progress.update(detail=f'Parsing {source}: line {done:,}/{total:,}'))
+                    if not ns and not ds:
+                        raise ValueError('source contains no recognized block records')
+                    nets.update(ns)
+                    names.update(ds)
+                    report['sources'].append({'source': source, 'networks': len(ns), 'domains': len(ds), 'ignored_lines': ignored})
+                except (OSError, ValueError) as exc:
+                    if not args.allow_partial:
+                        raise ValueError(f'{source}: {exc}') from exc
+                    report['failed_sources'].append({'source': source, 'error': str(exc)})
+                    LOG.warning('%s: %s', source, exc)
+                progress.update(advance=1, detail=f'{source}; {len(nets):,} networks, {len(names):,} domains; {len(report["failed_sources"])} failed feeds')
+            # Filter individually here so explicit hosts still get PTR queries even
+            # when also contained in a large source CIDR.
+            progress.start('[3/7] Apply exclusions', len(nets) + len(names))
+            filtered_nets = set()
+            for n in nets:
+                filtered_nets.update(subtract([n], allowed_nets))
+                progress.update(detail=f'Network {n}', advance=1)
+            nets = filtered_nets
+            filtered_names = set()
+            for n in names:
+                if not domain_allowed(n, allowed_names):
+                    filtered_names.add(n)
+                progress.update(detail=f'Domain {n}', advance=1)
+            names = filtered_names
+            if not args.ipv6:
+                nets = {n for n in nets if n.version == 4}
+            if not args.no_dns:
+                nets, names = enrich(nets, names, allowed_nets, allowed_names, args, report, progress=progress)
+            else:
+                progress.start("[4/7] DNS enrichment", detail="Skipped (--no-dns)")
+            if not args.ipv6:
+                nets = {n for n in nets if n.version == 4}
+            progress.start("[5/7] Final exclusions", detail=f"Filtering {len(nets):,} networks after enrichment")
+            nets = subtract(nets, allowed_nets)
+            if not nets and not names and not args.allow_empty:
+                raise ValueError('empty result; use --allow-empty only if intentional')
+            compact, optimized = optimize(nets, args, report, progress=progress)
+            report['domain_count'] = len(names)
+            report['dns_enabled'] = not args.no_dns
+            # Generate everything successfully in staging before replacing any output.
+            args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=args.output_dir.parent) as staging:
+                write_bundle(Path(staging), compact, optimized, names, args, report, progress=progress)
+                args.output_dir.mkdir(parents=True, exist_ok=True)
+                staged_files = list(Path(staging).iterdir())
+                progress.start("[7/7] Publish output bundle", len(staged_files), str(args.output_dir))
+                for f in staged_files:
+                    progress.update(detail=f.name)
+                    f.replace(args.output_dir / f.name)
+                    progress.update(advance=1)
+            for dest, name in [(args.output_ip_list_v4, 'ips-v4.txt'), (args.output_ip_list_v6, 'ips-v6.txt'), (args.output_domain_list, 'domains.txt')]:
+                if dest and dest.resolve() != (args.output_dir / name).resolve():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    progress.update(detail=f"Copying {name} to {dest}")
+                    shutil.copyfile(args.output_dir / name, dest)
+            progress.finish()
+            LOG.info('Generated %s: %d domain names, %d ipset entries. Nothing installed.', args.output_dir, len(names), len(optimized))
+            return 0
+        except (OSError, ValueError, ImportError, subprocess.SubprocessError) as exc:
+            progress.finish('failed')
+            LOG.error('%s', exc)
+            return 1

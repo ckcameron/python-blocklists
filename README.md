@@ -49,6 +49,27 @@ Provide explicit allowlist files when exceptions must be honored. JSON object
 keys are metadata, not indicators; only string values are read. Do not feed it
 arbitrary prose or HTML pages as threat lists.
 
+## Runtime progress
+
+The generator reports seven stages: input discovery, reading/parsing feeds,
+initial exclusions, DNS enrichment, final exclusions, IP optimization, and bundle
+creation/publication. Interactive terminals show an animated spinner, current
+file/query/address, completed/total counts and percentages when totals are known,
+and elapsed time. The spinner continues while downloads or optimizer subprocesses
+are busy. Feed details include bytes read and parsing line counts; DNS rounds
+count queries as they complete (including failed lookups).
+
+Progress goes to stderr; stdout and generated list formats stay unchanged.
+Redirected output automatically uses plain stage summaries, with intermediate
+updates rate-limited to once every five seconds during item processing. Errors
+and warnings remain visible in every mode. No extra Python dependency is needed.
+
+```sh
+python blocklists ./feeds --progress auto   # default: spinner on a terminal
+python blocklists ./feeds --progress plain # log-friendly stage/count updates
+python blocklists ./feeds --progress off   # warnings/errors and final summary only
+```
+
 ## DNS enrichment and exclusions
 
 Each expansion round queries A/AAAA for new domains and PTR for new IPs, then
