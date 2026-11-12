@@ -5,6 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
+        **Suspected vulnerability?** Follow the [security policy](https://github.com/ckcameron/python-blocklists/security/policy) to report it privately.
         Check the [troubleshooting guide](https://github.com/ckcameron/python-blocklists/wiki/Troubleshooting) and [existing issues](https://github.com/ckcameron/python-blocklists/issues?q=is%3Aissue) before filing.
         Issues are public. Remove credentials, private feed URLs, and internal IP addresses or hostnames from examples and logs.
 
