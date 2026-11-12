@@ -2,5 +2,5 @@
 # Copyright 2025-2026 CK Cameron. SPDX-License-Identifier: GPL-3.0-only
 from blocklists_core import main
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())
