@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a new capability or an improvement to an existing workflow.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search [existing issues](https://github.com/ckcameron/python-blocklists/issues?q=is%3Aissue) for similar requests before opening a new one.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and where does the current workflow fall short?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: >-
+        Describe what should change. A sample command, input format, output, or
+        deployment scenario can help explain the idea.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: What have you tried, and what limitations remain?
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How would you know it works?
+      description: Include an example result and any compatibility or default behavior constraints that matter.
