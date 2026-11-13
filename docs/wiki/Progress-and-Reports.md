@@ -29,7 +29,7 @@ Generated installers have their own command/status output, not this spinner UI.
 
 | Field | Meaning |
 |---|---|
-| `sources` | Successful source records: source string, unique networks, unique domains, ignored lines |
+| `sources` | Source string, unique networks, unique domains, and ignored lines for each successfully parsed source, including local files with zero recognized records |
 | `failed_sources` | Sources omitted under `--allow-partial`, with error strings |
 | `optimizer` | Requested optimization backend |
 | `dns_enabled` | Whether enrichment ran |
