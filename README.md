@@ -34,8 +34,9 @@ python blocklists ./feeds --output-dir generated
 python blocklists --default_lists --output-dir generated
 ```
 
-The default run performs bounded forward/reverse DNS enrichment and iprange
-optimization. `--no-dns` disables DNS, but does not stop downloads from URL
+The default run starts forward DNS lookups while parsing feeds and finishes DNS
+enrichment before iprange optimization. There is no default total DNS query
+limit. `--no-dns` disables DNS, but does not stop downloads from URL
 inputs. Live feed availability and access requirements depend on their providers.
 The terminal displays stage spinners, current work, completion counts, and elapsed
 time; redirected stderr uses plain progress. Use `--progress plain` or
