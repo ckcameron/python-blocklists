@@ -8,6 +8,11 @@ and elapsed time. The spinner continues while downloads or optimizer subprocesse
 are busy. Feed details include bytes read and parsing line counts; DNS rounds
 count queries as they complete (including failed lookups).
 
+The `DNS completed/scheduled` counter appears alongside the current stage while
+lookups run. It includes forward and reverse queries, including failures, and
+accumulates across all expansion rounds. The scheduled count grows as the
+generator discovers and submits queries.
+
 Progress goes to stderr; stdout and generated list formats stay unchanged.
 Redirected output automatically uses plain stage summaries, with intermediate
 updates rate-limited to once every five seconds during item processing. Errors
@@ -36,7 +41,7 @@ Generated installers have their own command/status output, not this spinner UI.
 | `dns_queries` | Scheduled A/AAAA/PTR queries across completed rounds |
 | `dns_failures` | Counts keyed by dnspython exception class name |
 | `associations` | Successful query name/type/answers, in completion order |
-| `dns_budget_exhausted` | Present when a round's task list exceeds the remaining budget |
+| `dns_budget_exhausted` | Present when an explicit `--max-dns-queries` limit prevents further queries |
 | `dns_unqueried_domains` | Names still missing at least one forward query |
 | `ptr_skipped_networks` | Prefixes too large for PTR enumeration |
 | `dns_round_limit` | Configured maximum expansion rounds |
@@ -47,8 +52,8 @@ Generated installers have their own command/status output, not this spinner UI.
 DNS-specific fields are absent when DNS is disabled. Source counts precede
 cross-source deduplication, exclusions, and enrichment. Do not sum them to infer
 final coverage. `dns_unqueried_domains` does not inventory every unqueried IP.
-`dns_budget_exhausted` is not guaranteed to appear when the last scheduled query
-exactly consumes the budget and there is no subsequent round to inspect.
+Reaching an explicit budget exactly can leave `dns_budget_exhausted` absent if
+the generator discovers no further queries within its configured rounds.
 
 ---
 [Documentation home](Home.md) · [Source repository](https://github.com/ckcameron/python-blocklists)

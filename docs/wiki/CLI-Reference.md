@@ -33,7 +33,7 @@ such as `--no-dns`, are ordinary flags and take no value.
 | `--resolver` | `[]` | DNS server IP; repeatable |
 | `--dns-timeout` | `3.0` | deadline per DNS query in seconds |
 | `--dns-rounds` | `3` | bounded A/AAAA/PTR expansion rounds |
-| `--max-dns-queries` | `100000` | total query budget across all DNS rounds |
+| `--max-dns-queries` | unlimited | optional total query budget across all DNS rounds |
 | `--ptr-max-addresses` | `4096` | max addresses per input network to enumerate for PTR |
 | `--workers` | `32` | maximum concurrent DNS workers |
 | `--optimizer` | `iprange` | IP prefix optimization backend |

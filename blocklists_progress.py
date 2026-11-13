@@ -35,6 +35,8 @@ class Progress:
         self.total = None
         self.detail = ""
         self.started = 0
+        self.dns_scheduled = 0
+        self.dns_completed = 0
 
     def __enter__(self):
         """Start a daemon that animates while the main thread waits on blocking work."""
@@ -71,7 +73,12 @@ class Progress:
             if self.total:
                 count += f" ({100 * self.completed / self.total:.0f}%)"
         elapsed = time.monotonic() - self.started
-        return f"{status} {self.stage} | {count} | {elapsed:.1f}s | {self.detail}"
+        dns = (
+            f" | DNS {self.dns_completed:,}/{self.dns_scheduled:,} completed"
+            if self.dns_scheduled
+            else ""
+        )
+        return f"{status} {self.stage}{dns} | {count} | {elapsed:.1f}s | {self.detail}"
 
     def _render(self, status=None, final=False):
         """Write one bounded terminal line or one complete plain-text log record."""
@@ -104,12 +111,26 @@ class Progress:
             if completed is not None:
                 self.completed = completed
             self.completed += advance
-            if (
-                self.stage
-                and not self.animated
-                and time.monotonic() - self.last_log >= self.log_interval
-            ):
-                self._render("work")
+            self._render_update()
+
+    def dns_update(self, scheduled=0, completed=0, detail=None):
+        """Track DNS work across foreground stages and successive expansion rounds."""
+        if not self.enabled:
+            return
+        with self.lock:
+            self.dns_scheduled += scheduled
+            self.dns_completed += completed
+            if detail and self.stage and self.stage.startswith("[4/7]"):
+                self.detail = detail
+            self._render_update()
+
+    def _render_update(self):
+        if (
+            self.stage
+            and not self.animated
+            and time.monotonic() - self.last_log >= self.log_interval
+        ):
+            self._render("work")
 
     def finish(self, status="done"):
         """Close the active stage without inventing completion for unfinished items."""

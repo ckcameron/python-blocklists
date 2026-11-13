@@ -2,16 +2,20 @@
 
 # Copyright 2025-2026 CK Cameron. SPDX-License-Identifier: GPL-3.0-only
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager, nullcontext
 import ipaddress as ip
+from itertools import chain
 import json
 import logging
 from pathlib import Path
+from queue import SimpleQueue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from threading import Event
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -58,7 +62,7 @@ def networks(value):
     return []
 
 
-def parse_text(text, on_progress=None):
+def parse_text(text, on_progress=None, on_domain=None):
     """Recognize list records, never scrape domains out of comments or prose.
 
     Supports IP/CIDR/range, hosts, URLs, CSV/TSV tokens, JSON values,
@@ -153,6 +157,8 @@ def parse_text(text, on_progress=None):
             else:
                 name = domain(token)
                 if name:
+                    if on_domain and name not in names:
+                        on_domain(name)
                     names.add(name)
                     accepted = True
         if not accepted:
@@ -242,98 +248,68 @@ class Resolver:
 
 
 def enrich(
-    nets, names, allowed_nets, allowed_names, args, report, resolver=None, progress=None
+    nets,
+    names,
+    allowed_nets,
+    allowed_names,
+    args,
+    report,
+    resolver=None,
+    progress=None,
+    queries=None,
+    forward_nets=(),
 ):
-    """Bounded rounds of forward/reverse expansion, with no silent range sampling."""
+    """Expand each round from its initial indicators, including after early lookups."""
     progress = progress or Progress("off")
-    resolver = resolver or Resolver(args.dns_timeout, args.resolver)
-    seen = set()
     skipped = set()
     nets, names = set(nets), set(names)
-    query_count = 0
-    failures = {}
-    associations = []
-    for round_number in range(args.dns_rounds):
-        progress.start(
-            f"[4/7] DNS round {round_number + 1}: planning",
-            detail="Collecting new forward and reverse queries",
-        )
-        tasks = [
-            (n, typ)
-            for n in sorted(names)
-            for typ in ("A", "AAAA")
-            if (n, typ) not in seen
-        ]
-        for n in sorted(
-            nets, key=lambda x: (x.version, int(x.network_address), x.prefixlen)
-        ):
-            if n.num_addresses > args.ptr_max_addresses:
-                skipped.add(str(n))
-                continue
-            for address in n:
-                task = (str(address), "PTR")
-                if task not in seen:
-                    tasks.append(task)
-        tasks = list(dict.fromkeys(tasks))
-        remaining = args.max_dns_queries - query_count
-        if len(tasks) > remaining:
-            report["dns_budget_exhausted"] = True
-            tasks = tasks[:remaining]
-        if not tasks:
-            break
-        progress.start(
-            f"[4/7] DNS round {round_number + 1}/{args.dns_rounds}",
-            len(tasks),
-            "Starting DNS queries",
-        )
-        seen.update(tasks)
-        query_count += len(tasks)
-        # Submit bounded batches; report fast answers before slower queries finish.
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for offset in range(0, len(tasks), args.workers * 4):
-                batch = tasks[offset : offset + args.workers * 4]
-                progress.update(
-                    detail=f"Querying {batch[0][1]} {batch[0][0]}; {len(batch)} queued in batch"
-                )
-                futures = [pool.submit(resolver.query, task) for task in batch]
-                for future in as_completed(futures):
-                    (name, typ), values, error = future.result()
-                    progress.update(
-                        detail=f'{typ} {name}: {error or str(len(values)) + " answer(s)"}',
-                        advance=1,
-                    )
-                    if error:
-                        failures[error] = failures.get(error, 0) + 1
-                    if values:
-                        associations.append(
-                            {"name": name, "type": typ, "answers": values}
-                        )
-                    if typ == "PTR":
-                        names.update(
-                            d
-                            for v in values
-                            if (d := domain(v)) and not domain_allowed(d, allowed_names)
-                        )
-                    else:
-                        for value in values:
-                            nets.update(subtract(networks(value), allowed_nets))
+    query_context = (
+        nullcontext(queries)
+        if queries is not None
+        else DNSQueries(args, progress, resolver)
+    )
+    with query_context as queries:
+        for round_number in range(args.dns_rounds):
+            progress.start(f"[4/7] DNS round {round_number + 1}/{args.dns_rounds}")
+            # Snapshot the round before processing results. PTR addresses are lazy.
+            forward = forward_tasks(sorted(names))
+            eligible = []
+            for network in sorted(
+                nets, key=lambda n: (n.version, int(n.network_address), n.prefixlen)
+            ):
+                if network.num_addresses > args.ptr_max_addresses:
+                    skipped.add(str(network))
+                else:
+                    eligible.append(network)
+            reverse = (
+                (str(address), "PTR") for network in eligible for address in network
+            )
+            submitted = queries.run(
+                chain(forward, reverse), nets, names, allowed_nets, allowed_names
+            )
+            if round_number == 0:
+                nets.update(forward_nets)
+            discovered = submitted or (round_number == 0 and forward_nets)
+            if queries.budget_exhausted or not discovered:
+                break
     pending_domains = sorted(
-        n for n in names if any((n, typ) not in seen for typ in ("A", "AAAA"))
+        n for n in names if any((n, typ) not in queries.seen for typ in ("A", "AAAA"))
     )
     report.update(
-        dns_queries=query_count,
-        dns_failures=failures,
+        dns_queries=len(queries.seen),
+        dns_failures=queries.failures,
         dns_unqueried_domains=pending_domains,
         ptr_skipped_networks=sorted(skipped),
         dns_round_limit=args.dns_rounds,
-        associations=associations,
+        associations=queries.associations,
     )
     if skipped:
         LOG.warning(
             "PTR enumeration skipped for %d large networks; see report.json",
             len(skipped),
         )
-    if report.get("dns_budget_exhausted"):
+    if queries.budget_exhausted:
+        report["dns_budget_exhausted"] = True
         LOG.warning("DNS query budget reached; see report.json")
     if pending_domains:
         LOG.warning(
@@ -341,6 +317,124 @@ def enrich(
             len(pending_domains),
         )
     return nets, names
+
+
+def forward_tasks(names):
+    return ((name, kind) for name in names for kind in ("A", "AAAA"))
+
+
+class DNSQueries:
+    """Reuse one worker pool and keep only a rolling window of futures in flight."""
+
+    def __init__(self, args, progress, resolver=None):
+        self.resolver = resolver or Resolver(args.dns_timeout, args.resolver)
+        self.progress = progress
+        self.limit = args.max_dns_queries
+        self.window = args.workers * 4
+        self.pool = ThreadPoolExecutor(max_workers=args.workers)
+        self.seen = set()
+        self.failures = {}
+        self.associations = []
+        self.budget_exhausted = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.pool.shutdown(cancel_futures=True)
+
+    def query(self, task):
+        result = self.resolver.query(task)
+        (name, kind), values, error = result
+        outcome = error or f"{len(values)} answer(s)"
+        self.progress.dns_update(completed=1, detail=f"{kind} {name}: {outcome}")
+        return result
+
+    def run(self, tasks, nets, names, allowed_nets, allowed_names, stopped=None):
+        """Submit distinct tasks and apply completed answers on the calling thread."""
+        ready = SimpleQueue()
+        pending = set()
+        initial_count = len(self.seen)
+
+        def receive():
+            future = ready.get()
+            pending.remove(future)
+            (name, kind), values, error = future.result()
+            if error:
+                self.failures[error] = self.failures.get(error, 0) + 1
+            if values:
+                self.associations.append(
+                    {"name": name, "type": kind, "answers": values}
+                )
+            if kind == "PTR":
+                names.update(
+                    d
+                    for v in values
+                    if (d := domain(v)) and not domain_allowed(d, allowed_names)
+                )
+            else:
+                for value in values:
+                    nets.update(subtract(networks(value), allowed_nets))
+
+        try:
+            for task in tasks:
+                if task in self.seen:
+                    continue
+                if self.limit is not None and len(self.seen) >= self.limit:
+                    self.budget_exhausted = True
+                    break
+                if len(pending) == self.window:
+                    receive()
+                if stopped and stopped.is_set():
+                    break
+                self.seen.add(task)
+                self.progress.dns_update(scheduled=1)
+                future = self.pool.submit(self.query, task)
+                pending.add(future)
+                future.add_done_callback(ready.put)
+            while pending and (stopped is None or not stopped.is_set()):
+                receive()
+        finally:
+            for future in pending:
+                future.cancel()
+        return len(self.seen) - initial_count
+
+
+@contextmanager
+def background_forward_dns(queries, allowed_nets, allowed_names):
+    """Send newly parsed domains to DNS without making the feed reader wait."""
+    input_names = SimpleQueue()
+    stopped = Event()
+    forward_nets = set()
+
+    def eligible_names():
+        for name in iter(input_names.get, None):
+            if stopped.is_set():
+                return
+            if not domain_allowed(name, allowed_names):
+                yield name
+
+    with ThreadPoolExecutor(max_workers=1) as coordinator:
+        future = coordinator.submit(
+            queries.run,
+            forward_tasks(eligible_names()),
+            forward_nets,
+            set(),
+            allowed_nets,
+            allowed_names,
+            stopped,
+        )
+
+        def collect():
+            input_names.put(None)
+            future.result()
+            return forward_nets
+
+        try:
+            yield input_names.put, collect
+        finally:
+            stopped.set()
+            input_names.put(None)
 
 
 def optimize(nets, args, report, progress=None):
@@ -651,8 +745,7 @@ def cli():
     p.add_argument(
         "--max-dns-queries",
         type=positive,
-        default=100000,
-        help="total query budget across all DNS rounds",
+        help="optional total query limit across all DNS rounds (unlimited by default)",
     )
     p.add_argument(
         "--ptr-max-addresses",
@@ -757,7 +850,9 @@ def main(argv=None):
     p = cli()
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    with Progress(args.progress) as progress, progress.logging(LOG):
+    with Progress(args.progress) as progress, progress.logging(
+        LOG
+    ), ExitStack() as dns_stack:
         try:
             if args.dns_timeout <= 0 or args.reduce_percent < 0:
                 raise ValueError(
@@ -824,6 +919,18 @@ def main(argv=None):
                 allowed_names = parse_text(args.allowed_domains.read_text())[1]
             nets, names = set(), set()
             report = {"sources": [], "failed_sources": [], "optimizer": args.optimizer}
+            queries = on_domain = collect_forward = None
+            # An explicit budget keeps the existing sorted query priority.
+            if not args.no_dns and args.max_dns_queries is None:
+                queries = dns_stack.enter_context(DNSQueries(args, progress))
+                submit_domain, collect_forward = dns_stack.enter_context(
+                    background_forward_dns(queries, allowed_nets, allowed_names)
+                )
+
+                def on_domain(name):
+                    if name not in names:
+                        submit_domain(name)
+
             unique_sources = list(dict.fromkeys(expanded))
             progress.start("[2/7] Read and parse feeds", len(unique_sources))
             for source in unique_sources:
@@ -852,6 +959,7 @@ def main(argv=None):
                         on_progress=lambda done, total: progress.update(
                             detail=f"Parsing {source}: line {done:,}/{total:,}"
                         ),
+                        on_domain=on_domain,
                     )
                     nets.update(ns)
                     names.update(ds)
@@ -891,6 +999,10 @@ def main(argv=None):
             if not args.ipv6:
                 nets = {n for n in nets if n.version == 4}
             if not args.no_dns:
+                if collect_forward:
+                    progress.start(
+                        "[4/7] DNS enrichment", detail="Finishing input domain lookups"
+                    )
                 nets, names = enrich(
                     nets,
                     names,
@@ -899,7 +1011,10 @@ def main(argv=None):
                     args,
                     report,
                     progress=progress,
+                    queries=queries,
+                    forward_nets=collect_forward() if collect_forward else (),
                 )
+                dns_stack.close()
             else:
                 progress.start("[4/7] DNS enrichment", detail="Skipped (--no-dns)")
             if not args.ipv6:

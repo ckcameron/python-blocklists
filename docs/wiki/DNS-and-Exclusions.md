@@ -1,12 +1,14 @@
 # DNS enrichment and exclusions
 
-Each expansion round queries A/AAAA for new domains and PTR for new IPs, then
-adds the results to the corresponding unified lists. By default three rounds,
-32 workers, a three-second per-query deadline, and 100,000 total queries bound
-the work. The last round may discover entries that need another round; this is
-not an unlimited recursive crawl. Raise `--dns-rounds` / `--max-dns-queries` when
-needed. `report.json` contains successful associations, error counts and skipped
-PTR networks. Failed lookups never remove original input indicators.
+Forward A/AAAA lookups start as eligible domains are parsed and continue while
+the generator reads other feeds and applies exclusions. Each expansion round
+queries new domains and eligible IPs, adding the results to the unified lists
+before the next round. Defaults are three rounds, 32 workers, and a three-second
+deadline per query. There is no default total query cap. Set `--max-dns-queries`
+to apply a cap. Capped runs wait for source parsing so they can prioritize queries
+in the same sorted order regardless of source order. `report.json` contains
+successful associations, error counts, and skipped PTR networks. Failed lookups
+never remove original input indicators.
 
 PTR lookups enumerate networks containing at most 4,096 addresses by default;
 larger ranges remain blocked in full but are reported as skipped for PTR.
@@ -39,15 +41,13 @@ addresses. Review associations and add exclusions before deployment.
 ## Expansion and limits
 
 A round schedules unseen `(name, record type)` pairs. A and AAAA count as two
-queries; PTR counts once per enumerated address. Up to `workers * 4` futures are
-queued in a batch. Results are consumed as queries complete, so association
-ordering in the report can vary between runs. Error class names and successful
-answers are retained, but failed queries are not retried within the same run.
+queries. PTR counts once per enumerated address. The scheduler continuously
+refills a window of up to `workers * 4` submitted queries as results arrive.
+Association order can vary between runs. The report retains error class names
+and successful answers. Failed queries are not retried within the same run.
 
-The query budget is applied after building a round's task list. Increasing the
-PTR limit can therefore increase planning memory as well as DNS traffic. PTR
-network enumeration includes all addresses, rather than using a hosts-only
-iterator. No probabilistic sampling is performed.
+PTR tasks are generated as needed. PTR enumeration includes every address in an
+eligible network. Raising the PTR limit increases the potential query count.
 
 `-6 N` removes IPv6 network entries before and after enrichment; it does not
 suppress AAAA queries. A discovered name can still receive A/AAAA lookups in
