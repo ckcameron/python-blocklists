@@ -1,6 +1,10 @@
 # python-blocklists
 
+<<<<<<< HEAD
 Last signed update: 11 November, 2026
+=======
+Last signed commit: 11 November, 2026
+>>>>>>> 3aec320 (Signing wiki commits)
 
 Compile mixed threat feeds into unified IPv4, IPv6 and domain lists, then generate
 **self-contained installation scripts** for ipset/iptables, TCP Wrappers, Unbound,
