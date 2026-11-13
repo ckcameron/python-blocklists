@@ -4,8 +4,8 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
+from http.client import HTTPException
 import ipaddress as ip
-from itertools import chain
 import json
 import logging
 from pathlib import Path
@@ -26,6 +26,17 @@ LOG = logging.getLogger("blocklists")
 LOCAL_NETS = """0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8
 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4
 ::/128 ::1/128 ::ffff:0:0/96 fc00::/7 fe80::/10 ff00::/8""".split()
+DNS_LOCAL_NETS = tuple(ip.ip_network(network) for network in (*LOCAL_NETS, "fec0::/10"))
+LOCAL_DNS_ZONES = (
+    "home.arpa",
+    "in-addr.arpa",
+    "ip6.arpa",
+    "local",
+    "localhost",
+    "internal",
+    "lan",
+    "localdomain",
+)
 
 
 def domain(value):
@@ -227,22 +238,13 @@ class Resolver:
     def query(self, task):
         """Return (task, answers, error_name), treating DNS failures as report data."""
         import dns.exception
-        import dns.reversename
 
         name, kind = task
-        question = dns.reversename.from_address(name) if kind == "PTR" else name + "."
         try:
             answer = self.resolver.resolve(
-                question, kind, lifetime=self.timeout, search=False
+                name + ".", kind, lifetime=self.timeout, search=False
             )
-            return (
-                task,
-                [
-                    str(r.target).rstrip(".") if kind == "PTR" else r.address
-                    for r in answer
-                ],
-                None,
-            )
+            return task, [r.address for r in answer], None
         except dns.exception.DNSException as exc:
             return task, [], type(exc).__name__
 
@@ -259,64 +261,47 @@ def enrich(
     queries=None,
     forward_nets=(),
 ):
-    """Expand each round from its initial indicators, including after early lookups."""
+    """Add allowed addresses from forward lookups of eligible feed domains."""
     progress = progress or Progress("off")
-    skipped = set()
     nets, names = set(nets), set(names)
     query_context = (
         nullcontext(queries)
         if queries is not None
         else DNSQueries(args, progress, resolver)
     )
+    eligible = sorted(name for name in names if dns_name_eligible(name, allowed_names))
     with query_context as queries:
-        for round_number in range(args.dns_rounds):
-            progress.start(f"[4/7] DNS round {round_number + 1}/{args.dns_rounds}")
-            # Snapshot the round before processing results. PTR addresses are lazy.
-            forward = forward_tasks(sorted(names))
-            eligible = []
-            for network in sorted(
-                nets, key=lambda n: (n.version, int(n.network_address), n.prefixlen)
-            ):
-                if network.num_addresses > args.ptr_max_addresses:
-                    skipped.add(str(network))
-                else:
-                    eligible.append(network)
-            reverse = (
-                (str(address), "PTR") for network in eligible for address in network
-            )
-            submitted = queries.run(
-                chain(forward, reverse), nets, names, allowed_nets, allowed_names
-            )
-            if round_number == 0:
-                nets.update(forward_nets)
-            discovered = submitted or (round_number == 0 and forward_nets)
-            if queries.budget_exhausted or not discovered:
-                break
-    pending_domains = sorted(
-        n for n in names if any((n, typ) not in queries.seen for typ in ("A", "AAAA"))
-    )
+        progress.start("[4/7] DNS enrichment", detail="Resolving public A/AAAA records")
+        queries.run(forward_tasks(eligible), nets, allowed_nets)
+    nets.update(forward_nets)
+    pending_domains = [
+        name
+        for name in eligible
+        if any((name, kind) not in queries.seen for kind in ("A", "AAAA"))
+    ]
     report.update(
         dns_queries=len(queries.seen),
         dns_failures=queries.failures,
         dns_unqueried_domains=pending_domains,
-        ptr_skipped_networks=sorted(skipped),
-        dns_round_limit=args.dns_rounds,
+        ptr_skipped_networks=[],
+        dns_round_limit=1,
         associations=queries.associations,
     )
-    if skipped:
-        LOG.warning(
-            "PTR enumeration skipped for %d large networks; see report.json",
-            len(skipped),
-        )
     if queries.budget_exhausted:
         report["dns_budget_exhausted"] = True
         LOG.warning("DNS query budget reached; see report.json")
     if pending_domains:
         LOG.warning(
-            "%d discovered domains await forward lookup; increase DNS limits (see report.json)",
+            "%d domains await forward lookup; increase --max-dns-queries (see report.json)",
             len(pending_domains),
         )
     return nets, names
+
+
+def dns_name_eligible(name, allowed_names):
+    return not domain_allowed(name, allowed_names) and not any(
+        name == zone or name.endswith("." + zone) for zone in LOCAL_DNS_ZONES
+    )
 
 
 def forward_tasks(names):
@@ -327,7 +312,9 @@ class DNSQueries:
     """Reuse one worker pool and keep only a rolling window of futures in flight."""
 
     def __init__(self, args, progress, resolver=None):
-        self.resolver = resolver or Resolver(args.dns_timeout, args.resolver)
+        self.resolver = resolver
+        self.timeout = args.dns_timeout
+        self.nameservers = args.resolver
         self.progress = progress
         self.limit = args.max_dns_queries
         self.window = args.workers * 4
@@ -350,11 +337,10 @@ class DNSQueries:
         self.progress.dns_update(completed=1, detail=f"{kind} {name}: {outcome}")
         return result
 
-    def run(self, tasks, nets, names, allowed_nets, allowed_names, stopped=None):
+    def run(self, tasks, nets, allowed_nets, stopped=None):
         """Submit distinct tasks and apply completed answers on the calling thread."""
         ready = SimpleQueue()
         pending = set()
-        initial_count = len(self.seen)
 
         def receive():
             future = ready.get()
@@ -362,19 +348,18 @@ class DNSQueries:
             (name, kind), values, error = future.result()
             if error:
                 self.failures[error] = self.failures.get(error, 0) + 1
-            if values:
+            public_answers = []
+            for value in values:
+                address = ip.ip_address(value)
+                if any(address in network for network in DNS_LOCAL_NETS):
+                    continue
+                public_answers.append(value)
+                if not any(address in network for network in allowed_nets):
+                    nets.add(ip.ip_network(address))
+            if public_answers:
                 self.associations.append(
-                    {"name": name, "type": kind, "answers": values}
+                    {"name": name, "type": kind, "answers": public_answers}
                 )
-            if kind == "PTR":
-                names.update(
-                    d
-                    for v in values
-                    if (d := domain(v)) and not domain_allowed(d, allowed_names)
-                )
-            else:
-                for value in values:
-                    nets.update(subtract(networks(value), allowed_nets))
 
         try:
             for task in tasks:
@@ -387,6 +372,8 @@ class DNSQueries:
                     receive()
                 if stopped and stopped.is_set():
                     break
+                if self.resolver is None:
+                    self.resolver = Resolver(self.timeout, self.nameservers)
                 self.seen.add(task)
                 self.progress.dns_update(scheduled=1)
                 future = self.pool.submit(self.query, task)
@@ -397,7 +384,6 @@ class DNSQueries:
         finally:
             for future in pending:
                 future.cancel()
-        return len(self.seen) - initial_count
 
 
 @contextmanager
@@ -411,7 +397,7 @@ def background_forward_dns(queries, allowed_nets, allowed_names):
         for name in iter(input_names.get, None):
             if stopped.is_set():
                 return
-            if not domain_allowed(name, allowed_names):
+            if dns_name_eligible(name, allowed_names):
                 yield name
 
     with ThreadPoolExecutor(max_workers=1) as coordinator:
@@ -419,9 +405,7 @@ def background_forward_dns(queries, allowed_nets, allowed_names):
             queries.run,
             forward_tasks(eligible_names()),
             forward_nets,
-            set(),
             allowed_nets,
-            allowed_names,
             stopped,
         )
 
@@ -435,6 +419,40 @@ def background_forward_dns(queries, allowed_nets, allowed_names):
         finally:
             stopped.set()
             input_names.put(None)
+
+
+def reduce_with_iprange(executable, family, version, args):
+    """Reduce one address family and verify the result covers the exact input."""
+    if version == 6:
+        probe = subprocess.run(
+            [executable, "--has-ipv6"], capture_output=True, timeout=10
+        )
+        if probe.returncode != 0:
+            raise ValueError("iprange does not support IPv6")
+    command = [executable] + (["-6"] if version == 6 else [])
+    command += [
+        "--ipset-reduce",
+        str(args.reduce_percent),
+        "--ipset-reduce-entries",
+        str(args.reduce_entries),
+    ]
+    proc = subprocess.run(
+        command,
+        input=lines(family),
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip()[:500]
+        status = f"iprange exited with status {proc.returncode}"
+        raise ValueError(f"{status} ({detail})" if detail else status)
+    reduced = [
+        ip.ip_network(line.strip()) for line in proc.stdout.splitlines() if line.strip()
+    ]
+    if collapse(reduced) != family:
+        raise ValueError("iprange changed address coverage")
+    return reduced
 
 
 def optimize(nets, args, report, progress=None):
@@ -454,44 +472,19 @@ def optimize(nets, args, report, progress=None):
         )
         family = [n for n in original if n.version == version]
         reduced = family
+        fallback_reason = None
         if family and args.optimizer == "iprange":
-            supports = (
-                version == 4
-                or subprocess.run(
-                    [executable, "--has-ipv6"], capture_output=True, timeout=10
-                ).returncode
-                == 0
-            )
-            if supports:
-                command = [executable] + (["-6"] if version == 6 else [])
-                command += [
-                    "--ipset-reduce",
-                    str(args.reduce_percent),
-                    "--ipset-reduce-entries",
-                    str(args.reduce_entries),
-                ]
-                proc = subprocess.run(
-                    command,
-                    input="".join(f"{n}\n" for n in family),
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                    timeout=300,
-                )
-                reduced = [
-                    ip.ip_network(s.strip())
-                    for s in proc.stdout.splitlines()
-                    if s.strip()
-                ]
-                if collapse(reduced) != family:
-                    raise ValueError(
-                        "iprange changed address coverage; refusing generated output"
-                    )
-            else:
+            try:
+                reduced = reduce_with_iprange(executable, family, version, args)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                fallback_reason = str(exc)
                 LOG.warning(
-                    "Installed iprange lacks IPv6 support; using exact Python IPv6 collapse"
+                    "IPv%d optimization failed (%s). Using exact Python CIDRs.",
+                    version,
+                    fallback_reason,
                 )
-                report["ipv6_optimizer_fallback"] = True
+                if version == 6:
+                    report["ipv6_optimizer_fallback"] = True
         # hash:net cannot store /0; two /1s cover the identical address set.
         reduced = [
             part
@@ -503,18 +496,57 @@ def optimize(nets, args, report, progress=None):
             detail=f"IPv{version}: {len(family):,} compact CIDRs -> {len(reduced):,} ipset entries",
             advance=1,
         )
-        report[f"ipv{version}_optimization"] = {
+        optimization = {
             "minimal_cidrs": len(family),
             "ipset_entries": len(reduced),
             "prefix_lengths": len({n.prefixlen for n in reduced}),
             "addresses": sum(n.num_addresses for n in family),
         }
+        if fallback_reason is not None:
+            optimization["fallback_reason"] = fallback_reason
+        report[f"ipv{version}_optimization"] = optimization
     return original, result
 
 
 def lines(values):
     """Serialize records with one newline per item; an empty list stays empty."""
     return "".join(f"{v}\n" for v in values)
+
+
+def list_records(nets, names):
+    """Expose the three reusable text lists in their normal feed format."""
+    return {
+        "ips-v4.txt": (n for n in nets if n.version == 4),
+        "ips-v6.txt": (n for n in nets if n.version == 6),
+        "domains.txt": sorted(names),
+    }
+
+
+class Checkpoints:
+    """Publish each snapshot as one directory and retain it independently of staging."""
+
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.run = None
+
+    def __call__(self, stage, nets, names):
+        if not nets and not names:
+            return
+        if self.run is None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.run = Path(
+                tempfile.mkdtemp(prefix="checkpoints-", dir=self.output_dir)
+            )
+            LOG.info("Saving recovery checkpoints in %s", self.run)
+        ordered_nets = sorted(
+            nets, key=lambda n: (n.version, n.network_address, n.prefixlen)
+        )
+        with tempfile.TemporaryDirectory(prefix=".staging-", dir=self.run) as staging:
+            directory = Path(staging)
+            for filename, records in list_records(ordered_nets, names).items():
+                with (directory / filename).open("w", encoding="utf-8") as stream:
+                    stream.writelines(f"{record}\n" for record in records)
+            directory.rename(self.run / stage)
 
 
 def firewall_script(nets, args, remove=False):
@@ -592,9 +624,10 @@ def write_bundle(directory, compact, optimized, names, args, report, progress=No
     )
     directory.mkdir(parents=True, exist_ok=True)
     payloads = {
-        "ips-v4.txt": lines(n for n in compact if n.version == 4),
-        "ips-v6.txt": lines(n for n in compact if n.version == 6),
-        "domains.txt": lines(sorted(names)),
+        **{
+            name: lines(records)
+            for name, records in list_records(compact, names).items()
+        },
         "unbound-blocklists.conf": "server:\n"
         + lines(f'    local-zone: "{d}" always_nxdomain' for d in sorted(names)),
         "dnscrypt-blocked-names.txt": lines(sorted(names)),
@@ -720,7 +753,7 @@ def cli():
     p.add_argument(
         "--include-local",
         action="store_true",
-        help="do not exclude built-in local/private/multicast ranges",
+        help="keep explicit local/private/multicast IP entries from feeds",
     )
     p.add_argument(
         "--no-dns",
@@ -740,18 +773,18 @@ def cli():
         "--dns-rounds",
         type=positive,
         default=3,
-        help="bounded A/AAAA/PTR expansion rounds",
+        help="legacy option accepted for compatibility",
     )
     p.add_argument(
         "--max-dns-queries",
         type=positive,
-        help="optional total query limit across all DNS rounds (unlimited by default)",
+        help="optional total DNS query limit (unlimited by default)",
     )
     p.add_argument(
         "--ptr-max-addresses",
         type=positive,
         default=4096,
-        help="max addresses per input network to enumerate for PTR",
+        help="legacy option accepted for compatibility",
     )
     p.add_argument(
         "--workers", type=positive, default=32, help="maximum concurrent DNS workers"
@@ -849,6 +882,7 @@ def main(argv=None):
     """Discover, parse, enrich, and stage a bundle; return a shell-compatible status."""
     p = cli()
     args = p.parse_args(argv)
+    checkpoint = Checkpoints(args.output_dir)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     with Progress(args.progress) as progress, progress.logging(
         LOG
@@ -971,8 +1005,16 @@ def main(argv=None):
                             "ignored_lines": ignored,
                         }
                     )
-                except (OSError, ValueError) as exc:
-                    if not args.allow_partial:
+                except (OSError, ValueError, HTTPException, KeyboardInterrupt) as exc:
+                    if not args.allow_partial or isinstance(exc, KeyboardInterrupt):
+                        try:
+                            checkpoint("02-partial-sources", nets, names)
+                        except OSError as checkpoint_error:
+                            LOG.warning(
+                                "Could not save partial inputs: %s", checkpoint_error
+                            )
+                        if isinstance(exc, KeyboardInterrupt):
+                            raise
                         raise ValueError(f"{source}: {exc}") from exc
                     report["failed_sources"].append(
                         {"source": source, "error": str(exc)}
@@ -982,8 +1024,7 @@ def main(argv=None):
                     advance=1,
                     detail=f'{source}; {len(nets):,} networks, {len(names):,} domains; {len(report["failed_sources"])} failed feeds',
                 )
-            # Filter individually here so explicit hosts still get PTR queries even
-            # when also contained in a large source CIDR.
+            checkpoint("03-before-exclusions", nets, names)
             progress.start("[3/7] Apply exclusions", len(nets) + len(names))
             filtered_nets = set()
             for n in nets:
@@ -998,6 +1039,7 @@ def main(argv=None):
             names = filtered_names
             if not args.ipv6:
                 nets = {n for n in nets if n.version == 4}
+            checkpoint("04-before-dns", nets, names)
             if not args.no_dns:
                 if collect_forward:
                     progress.start(
@@ -1019,6 +1061,7 @@ def main(argv=None):
                 progress.start("[4/7] DNS enrichment", detail="Skipped (--no-dns)")
             if not args.ipv6:
                 nets = {n for n in nets if n.version == 4}
+            checkpoint("05-before-final-exclusions", nets, names)
             progress.start(
                 "[5/7] Final exclusions",
                 detail=f"Filtering {len(nets):,} networks after enrichment",
@@ -1026,7 +1069,9 @@ def main(argv=None):
             nets = subtract(nets, allowed_nets)
             if not nets and not names and not args.allow_empty:
                 raise ValueError("empty result; use --allow-empty only if intentional")
+            checkpoint("06-before-optimization", nets, names)
             compact, optimized = optimize(nets, args, report, progress=progress)
+            checkpoint("07-before-bundle", compact, names)
             report["domain_count"] = len(names)
             report["dns_enabled"] = not args.no_dns
             # Generate everything successfully in staging before replacing any output.

@@ -30,5 +30,29 @@ or dnspython. Generated shell scripts are POSIX shell. Existing unrelated files
 inside the output directory are not deleted. The report contains source URLs and
 DNS associations, so review it before publishing it elsewhere.
 
+## Recovery checkpoints
+
+Each run with usable records writes `domains.txt`, `ips-v4.txt`, and `ips-v6.txt`
+to numbered stage directories under `OUTPUT/checkpoints-*`. The generator logs
+the run directory when it saves the first checkpoint. The three files in a
+checkpoint become visible together. A failed or successful run leaves its saved
+checkpoints available. If a later input fails, `02-partial-sources` saves records
+from the earlier inputs that were read successfully.
+
+Choose the latest complete checkpoint from the run you want to recover. Pass
+that stage directory as an input and choose a new output directory. For example,
+to regenerate from the checkpoint before optimization using Python CIDR collapse:
+
+```sh
+python blocklists generated/checkpoints-RUN/06-before-optimization \
+  --no-dns --optimizer python -o recovered
+```
+
+Replace `checkpoints-RUN` with the logged directory name. Reuse your original
+exclusion and IPv6 settings, especially for `02-partial-sources` and
+`03-before-exclusions`. Omit `--no-dns` to run DNS enrichment on the recovered
+records. To finish a run with a failed source, also pass that source after fixing
+it. Each checkpoint is a feed containing the records available at that stage.
+
 ---
 [Documentation home](Home.md) · [Source repository](https://github.com/ckcameron/python-blocklists)

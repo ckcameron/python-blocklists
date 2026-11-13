@@ -92,9 +92,37 @@ class Networks(unittest.TestCase):
     def test_iprange_wrong_coverage_rejected(self):
         args = b.cli().parse_args([])
         proc = subprocess.CompletedProcess([], 0, '198.51.100.0/24\n', '')
+        report = {}
+        original = [ip.ip_network('198.51.100.1')]
         with patch.object(b.shutil, 'which', return_value='/usr/bin/iprange'), patch.object(b.subprocess, 'run', return_value=proc):
-            with self.assertRaisesRegex(ValueError, 'coverage'):
-                b.optimize([ip.ip_network('198.51.100.1')], args, {})
+            compact, reduced = b.optimize(original, args, report)
+        self.assertEqual((compact, reduced), (original, original))
+        self.assertIn('coverage', report['ipv4_optimization']['fallback_reason'])
+
+    def test_ipv6_iprange_failure_preserves_exact_coverage(self):
+        args = b.cli().parse_args([])
+        ipv4 = ip.ip_network('198.51.100.0/24')
+        ipv6 = ip.ip_network('2001:db8::/120')
+        reason = '--ipset-reduce is not supported in IPv6 mode'
+        processes = [
+            subprocess.CompletedProcess([], 0, '198.51.100.0/25\n198.51.100.128/25\n', ''),
+            subprocess.CompletedProcess([], 0, b'yes', b''),
+            subprocess.CompletedProcess([], 1, '', reason),
+        ]
+        report = {}
+        with (
+            patch.object(b.shutil, 'which', return_value='/usr/bin/iprange'),
+            patch.object(b.subprocess, 'run', side_effect=processes) as run,
+            self.assertLogs(b.LOG, 'WARNING') as warnings,
+        ):
+            compact, reduced = b.optimize([ipv4, ipv6], args, report)
+        self.assertEqual(compact, [ipv4, ipv6])
+        self.assertEqual(reduced, [*ipv4.subnets(), ipv6])
+        self.assertEqual(run.call_args_list[-1].args[0][1], '-6')
+        self.assertTrue(report['ipv6_optimizer_fallback'])
+        self.assertNotIn('fallback_reason', report['ipv4_optimization'])
+        self.assertIn(reason, report['ipv6_optimization']['fallback_reason'])
+        self.assertIn(reason, warnings.output[0])
 
     def test_reduced_prefixes_not_collapsed_again(self):
         args = b.cli().parse_args([])
@@ -105,38 +133,53 @@ class Networks(unittest.TestCase):
 
 
 class DNS(unittest.TestCase):
-    def test_forward_reverse_expansion(self):
+    def test_forward_lookups_skip_local_and_reverse_names(self):
         args = b.cli().parse_args([])
         answers = {('bad.example', 'A'): ['198.51.100.1'],
-                   ('198.51.100.1', 'PTR'): ['ptr.example'],
-                   ('ptr.example', 'AAAA'): ['2001:db8::8']}
+                   ('bad.example', 'AAAA'): ['2001:db8::8']}
+        queried = []
         class Resolver:
             def query(self, task):
+                queried.append(task)
                 return task, answers.get(task, []), None
         report = {}
-        nets, names = b.enrich(set(), {'bad.example'}, [], set(), args, report, Resolver())
-        self.assertIn(ip.ip_network('2001:db8::8'), nets)
-        self.assertIn('ptr.example', names)
-        self.assertEqual(report['dns_queries'], 5)
+        explicit_names = {
+            'bad.example', 'printer.local', 'router.home.arpa', 'a.localhost',
+            '1.100.51.198.in-addr.arpa', 'a.ip6.arpa', 'dns.internal', 'a.lan',
+            'a.localdomain',
+        }
+        explicit_network = ip.ip_network('198.51.100.0/24')
+        nets, names = b.enrich({explicit_network}, explicit_names, [], set(), args, report, Resolver())
+        self.assertEqual(set(queried), set(answers))
+        self.assertEqual(nets, {explicit_network, ip.ip_network('198.51.100.1'), ip.ip_network('2001:db8::8')})
+        self.assertEqual(names, explicit_names)
+        self.assertEqual(report['dns_queries'], 2)
+        self.assertEqual(report['dns_unqueried_domains'], [])
 
-    def test_bounded_ptr_no_ipv6_enumeration(self):
-        args = b.cli().parse_args(['--max-dns-queries', '2'])
+    def test_explicit_dns_query_budget(self):
+        args = b.cli().parse_args(['--max-dns-queries', '2', '--dns-rounds', '5', '--ptr-max-addresses', '9'])
         class Resolver:
             def query(self, task):
                 return task, [], None
         report = {}
-        b.enrich({ip.ip_network('2001:db8::/32'), ip.ip_network('198.51.100.0/24')}, set(), [], set(), args, report, Resolver())
+        b.enrich(set(), {'a.example', 'b.example'}, [], set(), args, report, Resolver())
         self.assertEqual(report['dns_queries'], 2)
-        self.assertEqual(report['ptr_skipped_networks'], ['2001:db8::/32'])
+        self.assertEqual(report['dns_unqueried_domains'], ['b.example'])
         self.assertTrue(report['dns_budget_exhausted'])
 
     def test_allowed_dns_answer_excluded(self):
-        args = b.cli().parse_args([])
+        args = b.cli().parse_args(['--include-local'])
         class Resolver:
             def query(self, task):
-                return task, ['127.0.0.1'] if task[1] == 'A' else [], None
-        nets, _ = b.enrich(set(), {'bad.example'}, [ip.ip_network('127.0.0.0/8')], set(), args, {}, Resolver())
-        self.assertFalse(nets)
+                values = ['127.0.0.1', '192.168.1.1', '198.51.100.1'] if task[1] == 'A' else ['fe80::1', 'fd00::1']
+                return task, values, None
+        local_feed = ip.ip_network('10.0.0.1')
+        report = {}
+        nets, _ = b.enrich({local_feed}, {'bad.example'}, [ip.ip_network('198.51.100.0/24')], set(), args, report, Resolver())
+        self.assertEqual(nets, {local_feed})
+        self.assertEqual(report['associations'], [
+            {'name': 'bad.example', 'type': 'A', 'answers': ['198.51.100.1']},
+        ])
 
 
 class Installers(unittest.TestCase):
@@ -185,6 +228,52 @@ class Installers(unittest.TestCase):
             (tmp/'domains.txt').write_text('previous.example\n')
             self.assertEqual(b.main([str(tmp/'missing'), '--no-dns', '-o', str(tmp)]), 1)
             self.assertEqual((tmp/'domains.txt').read_text(), 'previous.example\n')
+
+    def test_checkpoints_survive_failed_source_and_optimizer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feed = root / 'feed.txt'
+            feed.write_text('bad.example\n198.51.100.7\n2001:db8::7\n')
+            out = root / 'out'
+            out.mkdir()
+            (out / 'domains.txt').write_text('previous.example\n')
+            args = ['--no-dns', '--optimizer', 'python', '--progress', 'off']
+
+            self.assertEqual(b.main([str(feed), str(root / 'missing'), *args, '-o', str(out)]), 1)
+            partial, = out.glob('checkpoints-*/02-partial-sources')
+            self.assertEqual((partial / 'domains.txt').read_text(), 'bad.example\n')
+
+            with patch.object(b, 'optimize', side_effect=ValueError('optimizer failed')):
+                self.assertEqual(b.main([str(feed), *args, '-o', str(out)]), 1)
+            checkpoint, = out.glob('checkpoints-*/06-before-optimization')
+            self.assertNotEqual(partial.parent, checkpoint.parent)
+            self.assertEqual(
+                sorted(path.name for path in checkpoint.parent.iterdir()),
+                ['03-before-exclusions', '04-before-dns', '05-before-final-exclusions',
+                 '06-before-optimization'],
+            )
+            self.assertEqual((out / 'domains.txt').read_text(), 'previous.example\n')
+
+            recovered = root / 'recovered'
+            self.assertEqual(b.main([str(checkpoint), *args, '-o', str(recovered)]), 0)
+            for filename in ('domains.txt', 'ips-v4.txt', 'ips-v6.txt'):
+                self.assertEqual((recovered / filename).read_bytes(), (checkpoint / filename).read_bytes())
+            self.assertEqual(len(list(recovered.glob('checkpoints-*/07-before-bundle'))), 1)
+
+    def test_checkpoint_survives_background_dns_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feed = root / 'feed.txt'
+            feed.write_text('bad.example\n198.51.100.7\n')
+            out = root / 'out'
+            with patch.object(b, 'Resolver', side_effect=ImportError('DNS unavailable')):
+                self.assertEqual(b.main([
+                    str(feed), '--optimizer', 'python', '--progress', 'off', '-o', str(out),
+                ]), 1)
+            checkpoint, = out.glob('checkpoints-*/04-before-dns')
+            self.assertEqual((checkpoint / 'domains.txt').read_text(), 'bad.example\n')
+            self.assertEqual((checkpoint / 'ips-v4.txt').read_text(), '198.51.100.7/32\n')
+            self.assertFalse((out / 'domains.txt').exists())
 
     def test_local_files_without_block_records_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,33 +1,29 @@
 # DNS enrichment and exclusions
 
 Forward A/AAAA lookups start as eligible domains are parsed and continue while
-the generator reads other feeds and applies exclusions. Each expansion round
-queries new domains and eligible IPs, adding the results to the unified lists
-before the next round. Defaults are three rounds, 32 workers, and a three-second
-deadline per query. There is no default total query cap. Set `--max-dns-queries`
-to apply a cap. Capped runs wait for source parsing so they can prioritize queries
-in the same sorted order regardless of source order. `report.json` contains
-successful associations, error counts, and skipped PTR networks. Failed lookups
-never remove original input indicators.
+the generator reads other feeds and applies exclusions. The generator skips PTR
+queries and excludes names under `local`, `localhost`, `home.arpa`, `internal`,
+`lan`, `localdomain`, `in-addr.arpa`, and `ip6.arpa` from DNS enrichment. It also
+ignores DNS answers in local, private, and special-use ranges. Explicit feed
+records still follow the normal input and exclusion rules.
 
-PTR lookups enumerate networks containing at most 4,096 addresses by default;
-larger ranges remain blocked in full but are reported as skipped for PTR.
-Explicit individual addresses inside a larger input prefix still receive PTR
-queries. `--ptr-max-addresses` changes this limit. PTR records are reverse DNS
-associations, **not a complete inventory of all domains hosted at an IP**.
-Forward records and PTR data are time-dependent and may be absent or misleading.
-No passive-DNS service is assumed. The enrichment resolver should be independent
-of these blocklists (or previously blocked names may resolve to NXDOMAIN).
+The defaults are 32 workers and a three-second deadline per query, with no total
+query cap. Set `--max-dns-queries` to apply a cap. Capped runs wait for source
+parsing so they can prioritize queries in the same sorted order regardless of
+source order. `report.json` contains associations and error counts. Use an
+enrichment resolver independent of these blocklists so blocked names can resolve.
 
 ```sh
 python blocklists ./feeds --resolver 1.1.1.1 --resolver 9.9.9.9 \
   --allowed_ips management-networks.txt --allowed_domains trusted-domains.txt \
-  --dns-rounds 4 --output-dir generated
+  --output-dir generated
 ```
 
 Default IP exclusions: `0.0.0.0/8`, RFC1918 ranges, `100.64.0.0/10`, IPv4/IPv6
 loopback and link-local, IPv4 multicast/reserved high space, IPv4-mapped IPv6,
-IPv6 ULA and multicast. `--include-local` disables these built-in exclusions.
+IPv6 ULA and multicast. `--include-local` permits explicit feed IP entries in
+these ranges. DNS answers in these ranges or the deprecated IPv6 site-local
+range `fec0::/10` are always ignored.
 Explicit allowlisted IPs/CIDRs are subtracted precisely, including holes inside
 larger blocked networks, both before and after DNS enrichment. Domain allowlists
 remove a matching domain, its descendants, **and a blocked ancestor that would
@@ -38,20 +34,15 @@ Domain allowlisting does not automatically allow shared IPs; use `--allowed_ips`
 IP blocking derived from domains also blocks unrelated services sharing those
 addresses. Review associations and add exclusions before deployment.
 
-## Expansion and limits
+## Query scheduling
 
-A round schedules unseen `(name, record type)` pairs. A and AAAA count as two
-queries. PTR counts once per enumerated address. The scheduler continuously
+The scheduler submits one A and one AAAA lookup per eligible name and continuously
 refills a window of up to `workers * 4` submitted queries as results arrive.
-Association order can vary between runs. The report retains error class names
-and successful answers. Failed queries are not retried within the same run.
+Association order can vary between runs. Each lookup is attempted once per run.
 
-PTR tasks are generated as needed. PTR enumeration includes every address in an
-eligible network. Raising the PTR limit increases the potential query count.
-
-`-6 N` removes IPv6 network entries before and after enrichment; it does not
-suppress AAAA queries. A discovered name can still receive A/AAAA lookups in
-later rounds. DNS output is a point-in-time snapshot, not a TTL-aware live policy.
+`-6 N` removes IPv6 network entries before and after enrichment. The report still
+includes AAAA lookup results. DNS output reflects the resolver's answers at the
+time the generator ran.
 
 ## Built-in excluded networks
 

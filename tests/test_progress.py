@@ -157,7 +157,7 @@ class ProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first, second = root / 'first.txt', root / 'second.txt'
-            first.write_text('first.example\n' + '# comment\n' * 1024)
+            first.write_text('first.example\nprinter.local\n' + '# comment\n' * 1024)
             second.write_text('second.example\n')
             stderr = io.StringIO()
             with (patch.object(b, 'Resolver', Resolver), patch.object(b, 'Progress', Reporter),
@@ -167,5 +167,5 @@ class ProgressTests(unittest.TestCase):
                     '-o', str(root / 'out'),
                 ]), 0)
             self.assertIn('[2/7] Read and parse feeds | DNS ', stderr.getvalue())
-            self.assertIn('DNS 5/5 completed', stderr.getvalue())
+            self.assertIn('DNS 4/4 completed', stderr.getvalue())
             self.assertEqual((root / 'out' / 'ips-v4.txt').read_text(), '198.51.100.7/32\n')

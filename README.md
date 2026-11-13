@@ -77,8 +77,8 @@ requirements, bpffs, interfaces, namespaces, monitoring, and recovery.
 Generation and these installers do not install packages or reboot-persistence
 services. Never run the privileged integration suite on a production host.
 
-DNS-derived IP blocks can affect unrelated services on shared addresses. PTR
-records are not a complete inventory of domains. TCP Wrappers only protects
+DNS-derived IP blocks can affect unrelated services on shared addresses. DNS
+enrichment skips reverse lookups and local-network records. TCP Wrappers protects
 libwrap-aware services. eBPF protects covered TC paths independently of iptables;
 it cannot stop a privileged administrator from changing policy or reveal inner
 destinations hidden by an encrypted tunnel.
