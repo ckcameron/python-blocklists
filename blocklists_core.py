@@ -37,6 +37,12 @@ LOCAL_DNS_ZONES = (
     "lan",
     "localdomain",
 )
+DNS_RECORD = re.compile(
+    r"^(?:(?P<owner>\S+)\s+)?(?:(?:\d[\dwdhms]*|IN|CH|HS)\s+)*"
+    r"(?P<kind>PTR|TYPE12|A|AAAA|CNAME|DNAME|NS|MX|SRV|TXT|SOA)\s+"
+    r"(?P<value>\S+)(?:\s|$)",
+    re.IGNORECASE,
+)
 
 
 def domain(value):
@@ -58,6 +64,40 @@ def domain(value):
     return None
 
 
+def local_dns_name(name):
+    """Recognize local-only and reverse DNS zones after name normalization."""
+    return any(name == zone or name.endswith("." + zone) for zone in LOCAL_DNS_ZONES)
+
+
+def ignore_dns_record(line):
+    """Keep DNS record fields from being mistaken for independent indicators."""
+    if line.lower().startswith("ptr-record="):
+        return True
+    record = DNS_RECORD.match(line)
+    if record is None:
+        return False
+    return ignore_dns_fields(record["kind"], record["owner"], record["value"])
+
+
+def ignore_dns_fields(kind, owner, value):
+    kind = str(kind).upper()
+    if kind in ("12", "PTR", "TYPE12"):
+        return True
+    if isinstance(owner, str) and local_dns_name(owner.rstrip(".").lower()):
+        return True
+    if not isinstance(value, str):
+        return False
+    if kind in ("5", "39", "CNAME", "DNAME"):
+        return local_dns_name(value.rstrip(".").lower())
+    if kind not in ("1", "28", "A", "AAAA"):
+        return False
+    try:
+        address = ip.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in DNS_LOCAL_NETS)
+
+
 def networks(value):
     """Return exact CIDRs for an address, CIDR/netmask, or inclusive IP range."""
     try:
@@ -73,7 +113,7 @@ def networks(value):
     return []
 
 
-def parse_text(text, on_progress=None, on_domain=None):
+def parse_text(text, on_progress=None, on_domain=None, *, include_local_names=False):
     """Recognize list records, never scrape domains out of comments or prose.
 
     Supports IP/CIDR/range, hosts, URLs, CSV/TSV tokens, JSON values,
@@ -97,6 +137,13 @@ def parse_text(text, on_progress=None, on_domain=None):
                     for child in v:
                         yield from strings(child)
                 elif isinstance(v, dict):
+                    record_type = v.get("type", v.get("rrtype"))
+                    owner = v.get("owner", v.get("name"))
+                    value = v.get("data", v.get("target", v.get("address")))
+                    if record_type is not None and ignore_dns_fields(
+                        record_type, owner, value
+                    ):
+                        return
                     for child in v.values():
                         yield from strings(child)
 
@@ -116,6 +163,9 @@ def parse_text(text, on_progress=None, on_domain=None):
             continue
         line = re.sub(r"\s+#.*$", "", line).split(";", 1)[0].strip()
         if not line:
+            continue
+        if ignore_dns_record(line):
+            ignored += 1
             continue
         rule = re.fullmatch(r"\|\|([^/^$|^]+)\^?", line)
         zone = re.fullmatch(
@@ -167,7 +217,7 @@ def parse_text(text, on_progress=None, on_domain=None):
                 accepted = True
             else:
                 name = domain(token)
-                if name:
+                if name and (include_local_names or not local_dns_name(name)):
                     if on_domain and name not in names:
                         on_domain(name)
                     names.add(name)
@@ -238,13 +288,20 @@ class Resolver:
     def query(self, task):
         """Return (task, answers, error_name), treating DNS failures as report data."""
         import dns.exception
+        import dns.rdatatype
 
         name, kind = task
+        if kind not in ("A", "AAAA"):
+            return task, [], None
         try:
             answer = self.resolver.resolve(
                 name + ".", kind, lifetime=self.timeout, search=False
             )
-            return task, [r.address for r in answer], None
+            canonical = domain(answer.canonical_name.to_text(omit_final_dot=True))
+            if canonical is None or local_dns_name(canonical):
+                return task, [], None
+            expected_type = dns.rdatatype.from_text(kind)
+            return task, [r.address for r in answer if r.rdtype == expected_type], None
         except dns.exception.DNSException as exc:
             return task, [], type(exc).__name__
 
@@ -299,9 +356,7 @@ def enrich(
 
 
 def dns_name_eligible(name, allowed_names):
-    return not domain_allowed(name, allowed_names) and not any(
-        name == zone or name.endswith("." + zone) for zone in LOCAL_DNS_ZONES
-    )
+    return not local_dns_name(name) and not domain_allowed(name, allowed_names)
 
 
 def forward_tasks(names):
@@ -950,7 +1005,9 @@ def main(argv=None):
             if args.allowed_ips:
                 allowed_nets += list(parse_text(args.allowed_ips.read_text())[0])
             if args.allowed_domains:
-                allowed_names = parse_text(args.allowed_domains.read_text())[1]
+                allowed_names = parse_text(
+                    args.allowed_domains.read_text(), include_local_names=True
+                )[1]
             nets, names = set(), set()
             report = {"sources": [], "failed_sources": [], "optimizer": args.optimizer}
             queries = on_domain = collect_forward = None

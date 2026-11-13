@@ -36,6 +36,11 @@ quoted multiline records. Feed text must decode as UTF-8 (an initial BOM is
 accepted). Bare hostnames need at least two DNS labels; IP address tokens are
 handled separately. Wildcard input `*.bad.example` becomes `bad.example`.
 
+PTR records in zone-file syntax, dnsmasq `ptr-record=` lines, and typed JSON PTR
+records are skipped as a whole. The parser also skips local and reverse-zone
+names and DNS address records that map to local-network IPs. Standalone IP and
+CIDR entries still follow the generator's IP exclusion rules.
+
 Blank lines and lines beginning with `#`, `!`, `;`, `[`, or `@@` are skipped.
 Skipped comments and exceptions do not all increment `ignored_lines`; that field
 is a parser diagnostic, not a complete count of every discarded source line.
