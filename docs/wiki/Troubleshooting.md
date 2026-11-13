@@ -3,7 +3,7 @@
 | Symptom | Check and action |
 |---|---|
 | `iprange is required` | Install FireHOL iprange, set `--iprange PATH`, or explicitly use `--optimizer python` |
-| Source with zero recognized records | Check `sources` for local files and `failed_sources` for remote feeds skipped with `--allow-partial` |
+| Source with zero recognized records | Check `sources` for feeds with zero networks and zero domains |
 | `empty result` | Check the inputs and exclusions, or pass `--allow-empty` to generate an empty bundle intentionally |
 | Partial output | Inspect `failed_sources`; `--allow-partial` explicitly permits omissions |
 | Source exceeds limit | Review size, then deliberately raise `--max-source-bytes` if appropriate |

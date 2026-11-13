@@ -60,10 +60,10 @@ assurance that every listed endpoint is currently reachable. Downloads use a
 30-second urllib timeout and a 64 MiB per-source byte cap by default; the timeout
 is not a total wall-clock deadline for the entire download.
 
-Local files with no recognized records, including empty files, contribute zero
-records. Invalid UTF-8, oversized or unreadable sources, failed downloads, and
-remote feeds with no recognized records fail the run unless `--allow-partial`
-is set. If the final combined result is empty, generation requires `--allow-empty`.
+Sources with no recognized records, including empty files, contribute zero
+records. Invalid UTF-8, oversized or unreadable sources, and failed downloads
+fail the run unless `--allow-partial` is set. If the final combined result is
+empty, generation requires `--allow-empty`.
 
 ---
 [Documentation home](Home.md) · [Source repository](https://github.com/ckcameron/python-blocklists)
