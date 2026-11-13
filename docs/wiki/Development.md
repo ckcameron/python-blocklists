@@ -21,10 +21,9 @@
 
 `parse_text()` returns network and domain sets plus an ignored-line count.
 `subtract()` sorts interval endpoints and subtracts exclusions without enumerating
-whole networks. Initial filtering keeps explicit small prefixes separate so they
-can still receive PTR queries when also covered by a larger input range.
+whole networks.
 
-`enrich()` performs bounded rounds and filters new answers before adding them.
+`enrich()` adds the filtered A/AAAA answers for eligible feed domains.
 The final exclusion pass and `optimize()` produce two network layouts: compact
 CIDRs for readable lists/eBPF, and potentially expanded prefixes for ipset lookup
 cost. Every external optimizer result must collapse back to identical coverage.

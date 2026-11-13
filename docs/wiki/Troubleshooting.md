@@ -7,7 +7,6 @@
 | `empty result` | Check the inputs and exclusions, or pass `--allow-empty` to generate an empty bundle intentionally |
 | Partial output | Inspect `failed_sources`; `--allow-partial` explicitly permits omissions |
 | Source exceeds limit | Review size, then deliberately raise `--max-source-bytes` if appropriate |
-| PTR skipped | Prefix exceeds `--ptr-max-addresses`; full range remains blocked |
 | DNS budget/round warnings | Inspect report fields before raising limits; use an independent resolver |
 | Unexpected shared-host outage | Inspect DNS associations; IP blocks affect all services on an address |
 | Allowed subdomain unblocks parent | Parent zones are excluded to avoid overriding the allowlist; use narrower input blocks |

@@ -32,9 +32,9 @@ such as `--no-dns`, are ordinary flags and take no value.
 | `--no-dns` | `False` | skip DNS enrichment; URL inputs still download |
 | `--resolver` | `[]` | DNS server IP; repeatable |
 | `--dns-timeout` | `3.0` | deadline per DNS query in seconds |
-| `--dns-rounds` | `3` | bounded A/AAAA/PTR expansion rounds |
-| `--max-dns-queries` | unlimited | optional total query budget across all DNS rounds |
-| `--ptr-max-addresses` | `4096` | max addresses per input network to enumerate for PTR |
+| `--dns-rounds` | `3` | accepted for compatibility with older commands |
+| `--max-dns-queries` | unlimited | optional total DNS query budget |
+| `--ptr-max-addresses` | `4096` | accepted for compatibility with older commands |
 | `--workers` | `32` | maximum concurrent DNS workers |
 | `--optimizer` | `iprange` | IP prefix optimization backend |
 | `--iprange` | `iprange` | iprange executable |

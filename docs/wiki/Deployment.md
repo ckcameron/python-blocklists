@@ -36,8 +36,10 @@ and a 16,384-entry minimum budget; tune `--reduce-percent` / `--reduce-entries`.
 This is a tunable memory/lookup tradeoff, not a claim of universally optimal
 performance for all workloads. Every optimizer result is checked for exact
 address-set equality. Reduced prefixes are not collapsed again before ipset
-loading. Older iprange releases without IPv6 support use Python's exact IPv6
-collapse with a warning. `/0` is split into two `/1`s for `hash:net` compatibility.
+loading. If reduction fails, times out, or returns unusable output, the
+generator warns and uses exact Python CIDRs for the affected address family.
+Some `iprange` releases can read IPv6 addresses but cannot reduce their prefix
+lengths. `/0` is split into two `/1`s for `hash:net` compatibility.
 
 eBPF LPM tries use the compact CIDRs rather than ipset's prefix-expanded layout.
 
