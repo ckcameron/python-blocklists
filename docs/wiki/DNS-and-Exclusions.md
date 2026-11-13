@@ -4,8 +4,9 @@ Forward A/AAAA lookups start as eligible domains are parsed and continue while
 the generator reads other feeds and applies exclusions. The generator skips PTR
 queries and excludes names under `local`, `localhost`, `home.arpa`, `internal`,
 `lan`, `localdomain`, `in-addr.arpa`, and `ip6.arpa` from DNS enrichment. It also
-ignores DNS answers in local, private, and special-use ranges. Explicit feed
-records still follow the normal input and exclusion rules.
+ignores DNS answers in local, private, and special-use ranges, and answers whose
+canonical names are local-only. Only A/AAAA records of the requested type are
+used. The same local and reverse-zone names are skipped when parsing feeds.
 
 The defaults are 32 workers and a three-second deadline per query, with no total
 query cap. Set `--max-dns-queries` to apply a cap. Capped runs wait for source

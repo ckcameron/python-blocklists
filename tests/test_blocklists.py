@@ -52,6 +52,31 @@ bad.example; ignored.example
         self.assertEqual(names, {'example.org'})
         self.assertEqual(nets, {ip.ip_network('198.51.100.0/24')})
 
+    def test_feed_dns_records_do_not_leak_into_blocklists(self):
+        domains_seen = []
+        nets, names, _ = b.parse_text('''7.100.51.198.in-addr.arpa. 300 IN PTR target.example.
+IN PTR another.example.
+ptr-record=7.100.51.198.in-addr.arpa,dnsmasq.example
+public-looking.example. 3600 IN A 192.168.1.1
+public-alias.example. IN CNAME router.home.arpa.
+private.local. IN AAAA 2001:db8::7
+0.0.0.0 printer.local good.example
+||router.home.arpa^
+local-zone: "ip6.arpa" always_nxdomain
+198.51.100.7
+''', on_domain=domains_seen.append)
+        self.assertEqual(nets, {ip.ip_network('198.51.100.7')})
+        self.assertEqual(names, {'good.example'})
+        self.assertEqual(domains_seen, ['good.example'])
+        json_nets, json_names, _ = b.parse_text(json.dumps([
+            {'type': 'PTR', 'owner': 'ip6.arpa.', 'target': 'json-target.example'},
+            {'type': 1, 'name': 'json-router.example.', 'data': '10.0.0.7'},
+            {'type': 28, 'name': 'json-router.local.', 'data': '2001:db8::8'},
+            {'data': ['good.example']},
+        ]))
+        self.assertEqual(json_names, {'good.example'})
+        self.assertFalse(json_nets)
+
     def test_hostile_names(self):
         for name in ['x.example\n-j DROP', '$(id).example', 'x.example"', '*.com;touch /tmp/x', '-x.example', 'a' * 64 + '.example']:
             self.assertIsNone(b.domain(name))
@@ -133,6 +158,39 @@ class Networks(unittest.TestCase):
 
 
 class DNS(unittest.TestCase):
+    def test_received_dns_records_exclude_ptr_and_local_canonical_names(self):
+        import dns.message
+        import dns.resolver
+        import dns.rrset
+
+        request = dns.message.make_query('lookup.example.', 'A')
+        response = dns.message.make_response(request)
+        response.answer.append(dns.rrset.from_text('lookup.example.', 30, 'IN', 'A', '198.51.100.7'))
+        response.additional.append(dns.rrset.from_text('7.100.51.198.in-addr.arpa.', 30, 'IN', 'PTR', 'ptr.example.'))
+        answer = dns.resolver.Answer(
+            request.question[0].name, request.question[0].rdtype, request.question[0].rdclass,
+            dns.message.from_wire(response.to_wire()),
+        )
+
+        alias_response = dns.message.make_response(request)
+        alias_response.answer.extend([
+            dns.rrset.from_text('lookup.example.', 30, 'IN', 'CNAME', 'printer.local.'),
+            dns.rrset.from_text('printer.local.', 30, 'IN', 'A', '198.51.100.8'),
+        ])
+        alias_answer = dns.resolver.Answer(
+            request.question[0].name, request.question[0].rdtype, request.question[0].rdclass,
+            dns.message.from_wire(alias_response.to_wire()),
+        )
+        with patch('dns.resolver.Resolver', return_value=dns.resolver.Resolver(configure=False)):
+            resolver = b.Resolver(1, [])
+        task = ('lookup.example', 'A')
+        with patch.object(resolver.resolver, 'resolve', side_effect=[answer, alias_answer]) as resolve:
+            self.assertEqual(resolver.query(task), (task, ['198.51.100.7'], None))
+            self.assertEqual(resolver.query(task), (task, [], None))
+            ptr_task = ('7.100.51.198.in-addr.arpa', 'PTR')
+            self.assertEqual(resolver.query(ptr_task), (ptr_task, [], None))
+            self.assertEqual(resolve.call_count, 2)
+
     def test_forward_lookups_skip_local_and_reverse_names(self):
         args = b.cli().parse_args([])
         answers = {('bad.example', 'A'): ['198.51.100.1'],
