@@ -1,9 +1,16 @@
 # python-blocklists
 
+Last signed commit: 11 November, 2026
+
+Compile mixed threat feeds into unified IPv4, IPv6 and domain lists, then generate
+**self-contained installation scripts** for ipset/iptables, TCP Wrappers, Unbound,
+dnscrypt-proxy and eBPF. Generation is unprivileged and never installs blocks.
+=======
 Compile mixed threat feeds into unified IPv4, IPv6, and domain blocklists, then
 produce self-contained installers for ipset/iptables, TCP Wrappers, Unbound,
 dnscrypt-proxy, and TC eBPF. I keep generation separate from enforcement: running
 `blocklists` writes a bundle; it never installs blocks on the host.
+
 
 ![python-blocklists](blocklists.png)
 
