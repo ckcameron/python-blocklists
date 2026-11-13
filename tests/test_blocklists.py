@@ -186,6 +186,33 @@ class Installers(unittest.TestCase):
             self.assertEqual(b.main([str(tmp/'missing'), '--no-dns', '-o', str(tmp)]), 1)
             self.assertEqual((tmp/'domains.txt').read_text(), 'previous.example\n')
 
+    def test_local_files_without_block_records_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feeds = root / 'feeds'
+            feeds.mkdir()
+            (feeds / '01-empty.txt').touch()
+            (feeds / '02-comments.txt').write_text(' \n# comment\n', encoding='utf-8')
+            (feeds / '03-unrecognized.txt').write_text('???\n', encoding='utf-8')
+            (feeds / '04-valid.txt').write_text('bad.example\n', encoding='utf-8')
+            out = root / 'out'
+            args = [str(feeds), '--no-dns', '--optimizer', 'python', '--progress', 'off', '-o', str(out)]
+
+            self.assertEqual(b.main(args), 0)
+            self.assertEqual((out / 'domains.txt').read_text(), 'bad.example\n')
+            report = json.loads((out / 'report.json').read_text())
+            self.assertEqual(report['failed_sources'], [])
+            self.assertEqual(
+                [(item['networks'], item['domains']) for item in report['sources']],
+                [(0, 0), (0, 0), (0, 0), (0, 1)],
+            )
+
+            (feeds / '04-valid.txt').unlink()
+            self.assertEqual(b.main(args), 1)
+            self.assertEqual((out / 'domains.txt').read_text(), 'bad.example\n')
+            self.assertEqual(b.main([*args, '--allow-empty']), 0)
+            self.assertEqual((out / 'domains.txt').read_text(), '')
+
 
 class EBPF(unittest.TestCase):
     def test_tc_nested_program_metadata(self):
