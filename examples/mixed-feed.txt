@@ -1,0 +1,6 @@
+# Reserved example addresses; generation only unless you explicitly apply output.
+198.51.100.7
+2001:db8::7
+198.51.100.16-198.51.100.23
+0.0.0.0 bad.example tracker.example
+||ads.example^

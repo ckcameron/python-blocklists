@@ -11,8 +11,15 @@
 #ifndef MAX_PREFIXES
 #define MAX_PREFIXES 1024
 #endif
-struct key4 { __u32 prefixlen; __u8 address[4]; };
-struct key6 { __u32 prefixlen; __u8 address[16]; };
+// LPM keys use a host-order prefix length and network-order address bytes.
+struct key4 {
+    __u32 prefixlen;
+    __u8 address[4];
+};
+struct key6 {
+    __u32 prefixlen;
+    __u8 address[16];
+};
 struct event_key {
     __u32 family;
     __u32 ifindex;
@@ -20,7 +27,12 @@ struct event_key {
     __u32 endpoint;  // 0 source, 1 destination
     __u8 address[16];
 };
-struct counters { __u64 packets; __u64 bytes; };
+struct counters {
+    __u64 packets;
+    __u64 bytes;
+};
+
+// Separate families avoid ambiguous key widths and use exact CIDR coverage.
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __uint(max_entries, MAX_PREFIXES);
@@ -36,6 +48,7 @@ struct {
     __type(value, __u32);
 } blocked6 SEC(".maps");
 struct {
+    // Bound detail memory; per-CPU values avoid shared counter contention.
     __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
     __uint(max_entries, 16384);
     __type(key, struct event_key);
@@ -48,11 +61,15 @@ struct {
     __type(value, struct counters);
 } totals SEC(".maps");
 
+// Account for drops even when the detail map cannot allocate another entry.
 static __always_inline int deny(struct __sk_buff *skb, struct event_key *key)
 {
     __u32 index = key ? 0 : 1;
     struct counters *total = bpf_map_lookup_elem(&totals, &index);
-    if (total) { total->packets++; total->bytes += skb->len; }
+    if (total) {
+        total->packets++;
+        total->bytes += skb->len;
+    }
     if (key) {
         struct counters *counter = bpf_map_lookup_elem(&drops, key);
         if (!counter) {
@@ -60,7 +77,10 @@ static __always_inline int deny(struct __sk_buff *skb, struct event_key *key)
             bpf_map_update_elem(&drops, key, &zero, BPF_NOEXIST);
             counter = bpf_map_lookup_elem(&drops, key);
         }
-        if (counter) { counter->packets++; counter->bytes += skb->len; }
+        if (counter) {
+            counter->packets++;
+            counter->bytes += skb->len;
+        }
     }
     return TC_ACT_SHOT;
 }
@@ -83,6 +103,8 @@ static __always_inline int filter(struct __sk_buff *skb, __u32 direction)
     }
     if (protocol == ETH_P_8021Q || protocol == ETH_P_8021AD)
         return deny(skb, 0);
+    // Source wins attribution if both endpoints match; one packet is counted once.
+    // Only base IP headers are needed, including for fragments and extension headers.
     struct event_key event = { .ifindex = skb->ifindex, .direction = direction };
     if (protocol == ETH_P_IP) {
         struct iphdr hdr;
@@ -124,6 +146,14 @@ static __always_inline int filter(struct __sk_buff *skb, __u32 direction)
     // Continue other TC filters; do not override their policies with TC_ACT_OK.
     return TC_ACT_UNSPEC;
 }
-SEC("tc/ingress") int bl_ingress(struct __sk_buff *skb) { return filter(skb, 0); }
-SEC("tc/egress") int bl_egress(struct __sk_buff *skb) { return filter(skb, 1); }
+SEC("tc/ingress")
+int bl_ingress(struct __sk_buff *skb)
+{
+    return filter(skb, 0);
+}
+SEC("tc/egress")
+int bl_egress(struct __sk_buff *skb)
+{
+    return filter(skb, 1);
+}
 char LICENSE[] SEC("license") = "GPL";

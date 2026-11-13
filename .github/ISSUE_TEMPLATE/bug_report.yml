@@ -1,0 +1,74 @@
+name: Bug report
+description: Report incorrect behavior in the generator, generated files, or an installer.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Suspected vulnerability?** Follow the [security policy](https://github.com/ckcameron/python-blocklists/security/policy) to report it privately.
+        Check the [troubleshooting guide](https://github.com/ckcameron/python-blocklists/wiki/Troubleshooting) and [existing issues](https://github.com/ckcameron/python-blocklists/issues?q=is%3Aissue) before filing.
+        Issues are public. Remove credentials, private feed URLs, and internal IP addresses or hostnames from examples and logs.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected area
+      options:
+        - Feed loading or parsing
+        - DNS enrichment or exclusions
+        - IP optimization or generated files
+        - Progress display or reporting
+        - ipset / iptables installer
+        - TCP Wrappers installer
+        - Unbound or dnscrypt-proxy installer
+        - eBPF enforcement or monitoring
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+      description: Describe the result and which stage, output file, or installer was affected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: Describe the result you expected from the same command and input.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Include the command and flags you ran, a small redacted input sample if
+        relevant, and how often the problem occurs.
+      placeholder: |
+        1. Create a sample feed with ...
+        2. Run python blocklists ./sample.txt --no-dns --optimizer python
+        3. Inspect ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        Include the project version or commit, Python version, and OS or distro.
+        For installer issues, also include the kernel and relevant tool versions if known.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or report excerpt
+      description: Include the exit status if known and only the relevant redacted lines from stderr or report.json.
+      render: text
