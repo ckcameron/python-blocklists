@@ -828,9 +828,8 @@ def main(argv=None):
             progress.start("[2/7] Read and parse feeds", len(unique_sources))
             for source in unique_sources:
                 progress.update(detail=f"Reading {source}")
-                is_remote = source.startswith(("https://", "http://"))
                 try:
-                    if is_remote:
+                    if source.startswith(("https://", "http://")):
                         with urlopen(
                             Request(
                                 source, headers={"User-Agent": "python-blocklists/2"}
@@ -847,8 +846,6 @@ def main(argv=None):
                             )
                     if len(data) > args.max_source_bytes:
                         raise ValueError("source exceeds --max-source-bytes")
-                    if is_remote and not data.strip():
-                        raise ValueError("empty source")
                     progress.update(detail=f"Parsing {source}: {len(data):,} bytes")
                     ns, ds, ignored = parse_text(
                         data.decode("utf-8-sig"),
@@ -856,8 +853,6 @@ def main(argv=None):
                             detail=f"Parsing {source}: line {done:,}/{total:,}"
                         ),
                     )
-                    if is_remote and not ns and not ds:
-                        raise ValueError("source contains no recognized block records")
                     nets.update(ns)
                     names.update(ds)
                     report["sources"].append(

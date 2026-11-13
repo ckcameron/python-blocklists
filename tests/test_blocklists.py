@@ -213,6 +213,24 @@ class Installers(unittest.TestCase):
             self.assertEqual(b.main([*args, '--allow-empty']), 0)
             self.assertEqual((out / 'domains.txt').read_text(), '')
 
+    def test_remote_adblock_exceptions_are_ignored_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feed = root / 'feed.txt'
+            feed.write_text('bad.example\n', encoding='utf-8')
+            out = root / 'out'
+            url = 'https://feeds.example/adblock-allow.txt'
+            args = [url, str(feed), '--no-dns', '--optimizer', 'python', '--progress', 'off', '-o', str(out)]
+
+            with patch.object(b, 'urlopen', return_value=io.BytesIO(b'@@||allowed.example^\n')):
+                with self.assertNoLogs(b.LOG, level='WARNING'):
+                    self.assertEqual(b.main(args), 0)
+
+            self.assertEqual((out / 'domains.txt').read_text(), 'bad.example\n')
+            report = json.loads((out / 'report.json').read_text())
+            self.assertEqual(report['failed_sources'], [])
+            self.assertEqual(report['sources'][0]['domains'], 0)
+
 
 class EBPF(unittest.TestCase):
     def test_tc_nested_program_metadata(self):

@@ -14,9 +14,9 @@ python blocklists ./feeds https://example.org/threat-ips.txt --output-dir ./gene
 python blocklists --default_lists --output-dir ./generated
 ```
 
-Use actual feed URLs in place of the example URL. Empty local files and local
-files with no recognized entries contribute zero records. Failed downloads and
-remote feeds with no recognized entries fail the build by default.
+Use actual feed URLs in place of the example URL. Sources with no recognized
+entries, including empty files, contribute zero records. Failed downloads fail
+the build by default.
 `--allow-partial` permits partial-source results. See `report.json` for source
 counts. No live threat feeds are embedded in this repository.
 
